@@ -1,0 +1,10 @@
+{
+  "chrome_profile_path": "~/.config/google-chrome/Default",
+  "action_delay_min": 3.0,
+  "action_delay_max": 10.0,
+  "scroll_delay": 2.0,
+  "element_timeout": 15,
+  "max_retries": 3,
+  "skip_verified": true,
+  "skip_follower_threshold": 1000000
+}

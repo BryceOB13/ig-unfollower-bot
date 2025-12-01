@@ -1,0 +1,15 @@
+#!/bin/bash
+# IG Unfollower Runner Script
+# Copy this file to run.sh and fill in your credentials
+
+export PYTHONPATH="src"
+export IG_USERNAME="your_username"
+export IG_PASSWORD="your_password"
+
+# Update this path to your Python interpreter
+PYTHON="python3"
+
+MODE="${1:-compare}"
+
+echo "Running ig-unfollower in $MODE mode..."
+$PYTHON -m ig_unfollower.main --mode "$MODE" --username "$IG_USERNAME"
