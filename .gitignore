@@ -43,6 +43,8 @@ run.sh
 
 # Snapshots and data (contains personal data)
 snapshots/
+unfollowed_history.json
+unfollow.txt
 
 # Config with potential secrets
 config.json

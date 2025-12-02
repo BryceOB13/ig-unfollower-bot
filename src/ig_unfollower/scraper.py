@@ -386,10 +386,14 @@ class InstagramScraper:
         scroll_iteration = 0
         max_iterations = 600
         termination_reason = "unknown"
+        stall_detected = False  # Track if we've hit a stall
         
         # Diagnostic tracking
         scroll_positions: list[int] = []
         items_per_iteration: list[int] = []
+        
+        # Use slower scroll delay to avoid rate limiting
+        base_scroll_delay = self.config.scroll_delay
         
         while no_new_content_count < max_no_new_content and scroll_iteration < max_iterations:
             scroll_iteration += 1
@@ -436,19 +440,32 @@ class InstagramScraper:
                 # Track no new content - this is the main termination condition
                 if items_loaded == 0:
                     no_new_content_count += 1
-                    # Every 10 failed attempts, try scrolling up then down
+                    # Every 10 failed attempts, try aggressive scroll jiggle
                     if no_new_content_count % 10 == 0:
-                        logger.info(f"Scroll reset attempt (no_new_content={no_new_content_count})")
-                        self.driver.execute_script("""
-                            const modal = arguments[0];
-                            const divs = modal.querySelectorAll('div');
-                            for (const div of divs) {
-                                if (div.scrollHeight > div.clientHeight) {
-                                    div.scrollTop = Math.max(0, div.scrollTop - 2000);
+                        logger.info(f"Scroll jiggle attempt (no_new_content={no_new_content_count})")
+                        # Try scrolling to different positions to trigger lazy loading
+                        for jiggle_pos in [0, 0.25, 0.5, 0.75, 1.0]:
+                            self.driver.execute_script("""
+                                const modal = arguments[0];
+                                const ratio = arguments[1];
+                                const divs = modal.querySelectorAll('div');
+                                for (const div of divs) {
+                                    if (div.scrollHeight > div.clientHeight) {
+                                        div.scrollTop = div.scrollHeight * ratio;
+                                    }
                                 }
-                            }
-                        """, modal)
-                        time.sleep(1.5)
+                            """, modal, jiggle_pos)
+                            time.sleep(0.5)
+                            # Extract at each position
+                            jiggle_result = self._scroll_and_extract_unified(modal, all_usernames)
+                            if jiggle_result.get('success'):
+                                jiggle_new = jiggle_result.get('new_usernames', [])
+                                for username in jiggle_new:
+                                    all_usernames.add(username.lower())
+                                if jiggle_new:
+                                    logger.info(f"Jiggle found {len(jiggle_new)} users at {jiggle_pos*100:.0f}%")
+                                    no_new_content_count = 0  # Reset if we found something
+                        # Final scroll back to bottom
                         self.driver.execute_script("""
                             const modal = arguments[0];
                             const divs = modal.querySelectorAll('div');
@@ -461,6 +478,7 @@ class InstagramScraper:
                         time.sleep(1)
                 else:
                     no_new_content_count = 0  # Reset on any new content
+                    stall_detected = False  # Reset stall flag
                 
                 # Early termination only if we have 100% of expected
                 if expected_count > 0 and len(all_usernames) >= expected_count:
@@ -471,8 +489,15 @@ class InstagramScraper:
                 else:
                     target_reached_count = 0
                 
-                # Use config scroll delay
-                delay = self.config.scroll_delay
+                # Progressive delay - slower when stalling to avoid rate limits
+                if no_new_content_count > 5:
+                    stall_detected = True
+                    # Use progressively longer delays when stalling
+                    delay = base_scroll_delay * (1 + no_new_content_count * 0.1)
+                    delay = min(delay, 5.0)  # Cap at 5 seconds
+                else:
+                    delay = base_scroll_delay
+                
                 time.sleep(delay)
                 
             except StaleElementReferenceException:
@@ -869,22 +894,47 @@ class InstagramScraper:
         # Get expected count from profile
         _, following_count = self.get_profile_counts()
         
-        # Requirement 3.1: Click following count to open modal
-        modal = self._open_modal(self.FOLLOWING_LINK_SELECTOR, "Following")
-        if modal is None:
-            raise RuntimeError("Failed to open following modal")
+        all_usernames: set[str] = set()
+        max_attempts = 3
         
-        try:
-            # Requirement 3.4: Scroll and extract incrementally, return directly
-            usernames = self._scroll_modal_to_end(
-                modal, 
-                expected_count=following_count,
-                progress_callback=progress_callback
-            )
+        for attempt in range(max_attempts):
+            # Requirement 3.1: Click following count to open modal
+            modal = self._open_modal(self.FOLLOWING_LINK_SELECTOR, "Following")
+            if modal is None:
+                raise RuntimeError("Failed to open following modal")
             
-            logger.info(f"Scraped {len(usernames)} following (expected {following_count})")
-            return usernames
-            
-        finally:
-            # Requirement 3.5: Close the modal
-            self._close_modal()
+            try:
+                # Requirement 3.4: Scroll and extract incrementally
+                usernames = self._scroll_modal_to_end(
+                    modal, 
+                    expected_count=following_count,
+                    progress_callback=progress_callback
+                )
+                
+                # Add to cumulative set
+                for u in usernames:
+                    all_usernames.add(u.lower())
+                
+                completeness = len(all_usernames) / following_count * 100 if following_count > 0 else 100
+                logger.info(f"Attempt {attempt + 1}: {len(all_usernames)}/{following_count} ({completeness:.1f}%)")
+                
+                # If we got enough, stop
+                if len(all_usernames) >= following_count * 0.95:
+                    break
+                    
+                # Otherwise, close modal and try again
+                if attempt < max_attempts - 1:
+                    logger.info(f"Only {completeness:.1f}% complete, reopening modal for another pass...")
+                    self._close_modal()
+                    time.sleep(2)
+                    # Refresh the page to reset Instagram's state
+                    self.navigate_to_profile()
+                    time.sleep(1)
+                    
+            finally:
+                if attempt == max_attempts - 1 or len(all_usernames) >= following_count * 0.95:
+                    self._close_modal()
+        
+        final_usernames = list(all_usernames)
+        logger.info(f"Scraped {len(final_usernames)} following (expected {following_count})")
+        return final_usernames

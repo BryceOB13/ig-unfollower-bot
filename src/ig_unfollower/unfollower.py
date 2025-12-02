@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass, field
 
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import (
@@ -80,6 +81,37 @@ class UnfollowExecutor:
         time.sleep(delay)
         return delay
     
+    def _dismiss_any_modal(self) -> None:
+        """Dismiss any open modal/dialog that might be blocking clicks."""
+        if self.browser.driver is None:
+            return
+        
+        try:
+            # Try to close any open dialog by pressing Escape
+            body = self.browser.driver.find_element(By.TAG_NAME, "body")
+            body.send_keys(Keys.ESCAPE)
+            time.sleep(0.5)
+        except WebDriverException:
+            pass
+        
+        try:
+            # Try clicking the close button if a dialog is open
+            close_selectors = [
+                (By.XPATH, "//div[@role='dialog']//svg[@aria-label='Close']/ancestor::div[@role='button']"),
+                (By.XPATH, "//svg[@aria-label='Close']/.."),
+                (By.CSS_SELECTOR, "[aria-label='Close']"),
+            ]
+            for selector in close_selectors:
+                try:
+                    close_btn = self.browser.driver.find_element(*selector)
+                    self.browser.driver.execute_script("arguments[0].click();", close_btn)
+                    time.sleep(0.5)
+                    return
+                except NoSuchElementException:
+                    continue
+        except WebDriverException:
+            pass
+
     def _click_following_button(self) -> bool:
         """Click the 'Following' button on a user's profile page.
         
@@ -90,34 +122,63 @@ class UnfollowExecutor:
             return False
         
         try:
-            # Look for the "Following" button on the profile
-            # Instagram uses various selectors for this button
-            following_button_selectors = [
-                (By.XPATH, "//button[.//div[text()='Following']]"),
-                (By.XPATH, "//button[contains(@class, '_acan') and .//div[text()='Following']]"),
-                (By.XPATH, "//div[text()='Following']/ancestor::button"),
-                (By.CSS_SELECTOR, "button[type='button'] div:has-text('Following')"),
-            ]
+            # First, dismiss any modal that might be blocking
+            self._dismiss_any_modal()
             
-            for selector in following_button_selectors:
-                try:
-                    button = WebDriverWait(self.browser.driver, 5).until(
-                        EC.element_to_be_clickable(selector)
-                    )
-                    button.click()
-                    return True
-                except (TimeoutException, NoSuchElementException):
-                    continue
+            # Use JavaScript to find and click the Following button - most reliable
+            result = self.browser.driver.execute_script(
+                """
+                // Method 1: Find button with "Following" text in header
+                var headerButtons = document.querySelectorAll('header button');
+                for (var btn of headerButtons) {
+                    if (btn.textContent.trim() === 'Following') {
+                        btn.click();
+                        return {success: true, method: 'header button text'};
+                    }
+                }
+                
+                // Method 2: Find button containing div with "Following" text
+                var allButtons = document.querySelectorAll('button');
+                for (var btn of allButtons) {
+                    var divs = btn.querySelectorAll('div');
+                    for (var div of divs) {
+                        if (div.textContent.trim() === 'Following') {
+                            btn.click();
+                            return {success: true, method: 'button>div text'};
+                        }
+                    }
+                }
+                
+                // Method 3: Look for the specific button class pattern
+                var followingBtns = document.querySelectorAll('button[class*="_aswp"]');
+                for (var btn of followingBtns) {
+                    if (btn.textContent.includes('Following')) {
+                        btn.click();
+                        return {success: true, method: 'class _aswp'};
+                    }
+                }
+                
+                return {success: false, error: 'Following button not found'};
+                """
+            )
             
-            logger.warning("Could not find Following button")
-            return False
+            if result and result.get('success'):
+                logger.info(f"Clicked Following button ({result.get('method')})")
+                return True
+            else:
+                logger.warning(f"Could not find Following button: {result.get('error') if result else 'No result'}")
+                return False
             
         except WebDriverException as e:
             logger.error(f"Error clicking Following button: {e}")
             return False
     
     def _confirm_unfollow(self) -> bool:
-        """Confirm unfollow action in the popup dialog.
+        """Confirm unfollow action in the popup dialog/menu.
+        
+        Instagram shows a menu modal with options like "Add to close friends",
+        "Mute", "Restrict", and "Unfollow". We need to find and click the
+        Unfollow option in this menu.
         
         Returns:
             True if unfollow was confirmed successfully, False otherwise.
@@ -126,26 +187,98 @@ class UnfollowExecutor:
             return False
         
         try:
-            # Look for the "Unfollow" confirmation button in the dialog
-            unfollow_confirm_selectors = [
-                (By.XPATH, "//button[text()='Unfollow']"),
-                (By.XPATH, "//span[text()='Unfollow']/ancestor::button"),
-                (By.XPATH, "//div[@role='dialog']//button[contains(text(), 'Unfollow')]"),
-                (By.CSS_SELECTOR, "button._a9--._ap36._a9_1"),
-            ]
+            # Wait for the dialog/menu to appear
+            time.sleep(1.5)
             
-            for selector in unfollow_confirm_selectors:
-                try:
-                    confirm_button = WebDriverWait(self.browser.driver, 5).until(
-                        EC.element_to_be_clickable(selector)
-                    )
-                    confirm_button.click()
-                    return True
-                except (TimeoutException, NoSuchElementException):
-                    continue
+            # First check if dialog exists
+            try:
+                dialog = self.browser.driver.find_element(By.XPATH, "//div[@role='dialog']")
+                logger.debug(f"Dialog found, searching for Unfollow option...")
+            except NoSuchElementException:
+                logger.warning("No dialog found after clicking Following button")
+                return False
             
-            logger.warning("Could not find Unfollow confirmation button")
-            return False
+            # Use JavaScript to find and click the Unfollow option
+            # This is the most reliable method based on the HTML structure
+            result = self.browser.driver.execute_script(
+                """
+                // Find the dialog
+                var dialog = document.querySelector('[role="dialog"]');
+                if (!dialog) {
+                    console.log('No dialog found');
+                    return {success: false, error: 'No dialog found'};
+                }
+                
+                // Method 1: Find all clickable elements and look for Unfollow text
+                var buttons = dialog.querySelectorAll('[role="button"]');
+                console.log('Found ' + buttons.length + ' buttons in dialog');
+                
+                for (var btn of buttons) {
+                    var text = btn.textContent.trim();
+                    if (text === 'Unfollow') {
+                        console.log('Found Unfollow button, clicking...');
+                        btn.click();
+                        return {success: true, method: 'role=button direct'};
+                    }
+                }
+                
+                // Method 2: Find spans with Unfollow text
+                var spans = dialog.querySelectorAll('span');
+                for (var span of spans) {
+                    if (span.textContent.trim() === 'Unfollow') {
+                        console.log('Found Unfollow span, finding clickable parent...');
+                        var clickable = span.closest('[role="button"]') || span.closest('button');
+                        if (clickable) {
+                            clickable.click();
+                            return {success: true, method: 'span parent'};
+                        } else {
+                            // Click the span itself
+                            span.click();
+                            return {success: true, method: 'span direct'};
+                        }
+                    }
+                }
+                
+                // Method 3: Use TreeWalker to find text nodes
+                var walker = document.createTreeWalker(
+                    dialog,
+                    NodeFilter.SHOW_TEXT,
+                    null,
+                    false
+                );
+                
+                while (walker.nextNode()) {
+                    if (walker.currentNode.textContent.trim() === 'Unfollow') {
+                        var el = walker.currentNode.parentElement;
+                        var clickable = el.closest('[role="button"]') || el.closest('button') || el;
+                        clickable.click();
+                        return {success: true, method: 'treewalker'};
+                    }
+                }
+                
+                // Debug: list all text content in dialog
+                var allText = [];
+                var allSpans = dialog.querySelectorAll('span');
+                allSpans.forEach(function(s) {
+                    var t = s.textContent.trim();
+                    if (t && t.length < 50) allText.push(t);
+                });
+                
+                return {success: false, error: 'Unfollow not found', dialogTexts: allText.slice(0, 20)};
+                """
+            )
+            
+            if result and result.get('success'):
+                logger.info(f"Clicked Unfollow via JS ({result.get('method')})")
+                time.sleep(0.5)
+                return True
+            else:
+                error = result.get('error', 'Unknown') if result else 'No result'
+                texts = result.get('dialogTexts', []) if result else []
+                logger.warning(f"Could not find Unfollow: {error}")
+                if texts:
+                    logger.debug(f"Dialog contains: {texts[:10]}")
+                return False
             
         except WebDriverException as e:
             logger.error(f"Error confirming unfollow: {e}")
