@@ -46,8 +46,8 @@ export function UserRow({
           {onAddToSkip && (
             <button
               onClick={() => onAddToSkip(username)}
-              className="p-1.5 hover:bg-[#2a2a2d] rounded transition-colors"
-              title="Add to skip list"
+              className="p-1.5 hover:bg-[#2a2a2d] rounded transition-colors group relative"
+              title="Add to skip list - User won't appear in unfollow suggestions"
             >
               <Plus className="w-4 h-4 text-zinc-500 hover:text-zinc-300" />
             </button>
@@ -55,8 +55,8 @@ export function UserRow({
           {onUnfollow && (
             <button
               onClick={() => onUnfollow(username)}
-              className="p-1.5 hover:bg-rose-500/10 rounded transition-colors"
-              title="Unfollow"
+              className="p-1.5 hover:bg-rose-500/10 rounded transition-colors group relative"
+              title="Unfollow this user"
             >
               <UserMinus className="w-4 h-4 text-zinc-500 hover:text-rose-400" />
             </button>
@@ -65,8 +65,8 @@ export function UserRow({
             href={`https://instagram.com/${username}`}
             target="_blank"
             rel="noopener noreferrer"
-            className="p-1.5 hover:bg-[#2a2a2d] rounded transition-colors"
-            title="View profile"
+            className="p-1.5 hover:bg-[#2a2a2d] rounded transition-colors group relative"
+            title="View Instagram profile"
           >
             <ExternalLink className="w-4 h-4 text-zinc-500 hover:text-zinc-300" />
           </a>

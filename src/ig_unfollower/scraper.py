@@ -897,43 +897,29 @@ class InstagramScraper:
         all_usernames: set[str] = set()
         max_attempts = 3
         
-        for attempt in range(max_attempts):
-            # Requirement 3.1: Click following count to open modal
-            modal = self._open_modal(self.FOLLOWING_LINK_SELECTOR, "Following")
-            if modal is None:
-                raise RuntimeError("Failed to open following modal")
+        # Single attempt - Instagram's virtual scrolling often doesn't load 100%
+        # due to deleted accounts, rate limiting, etc. Accept what we get.
+        modal = self._open_modal(self.FOLLOWING_LINK_SELECTOR, "Following")
+        if modal is None:
+            raise RuntimeError("Failed to open following modal")
+        
+        try:
+            # Requirement 3.4: Scroll and extract incrementally
+            usernames = self._scroll_modal_to_end(
+                modal, 
+                expected_count=following_count,
+                progress_callback=progress_callback
+            )
             
-            try:
-                # Requirement 3.4: Scroll and extract incrementally
-                usernames = self._scroll_modal_to_end(
-                    modal, 
-                    expected_count=following_count,
-                    progress_callback=progress_callback
-                )
+            # Add to cumulative set
+            for u in usernames:
+                all_usernames.add(u.lower())
+            
+            completeness = len(all_usernames) / following_count * 100 if following_count > 0 else 100
+            logger.info(f"Collected {len(all_usernames)}/{following_count} ({completeness:.1f}%)")
                 
-                # Add to cumulative set
-                for u in usernames:
-                    all_usernames.add(u.lower())
-                
-                completeness = len(all_usernames) / following_count * 100 if following_count > 0 else 100
-                logger.info(f"Attempt {attempt + 1}: {len(all_usernames)}/{following_count} ({completeness:.1f}%)")
-                
-                # If we got enough, stop
-                if len(all_usernames) >= following_count * 0.95:
-                    break
-                    
-                # Otherwise, close modal and try again
-                if attempt < max_attempts - 1:
-                    logger.info(f"Only {completeness:.1f}% complete, reopening modal for another pass...")
-                    self._close_modal()
-                    time.sleep(2)
-                    # Refresh the page to reset Instagram's state
-                    self.navigate_to_profile()
-                    time.sleep(1)
-                    
-            finally:
-                if attempt == max_attempts - 1 or len(all_usernames) >= following_count * 0.95:
-                    self._close_modal()
+        finally:
+            self._close_modal()
         
         final_usernames = list(all_usernames)
         logger.info(f"Scraped {len(final_usernames)} following (expected {following_count})")

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { QueryClient, QueryClientProvider, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Header } from './components/Header';
 import { MetricsRow } from './components/MetricsRow';
@@ -54,6 +54,10 @@ function Dashboard() {
     queryFn: api.getConfig,
   });
 
+  // Track active operation to refresh data when it completes
+  const { activeOperation } = useAppStore();
+  const prevOperationRef = React.useRef(activeOperation);
+
   // Update store from status
   useEffect(() => {
     if (status) {
@@ -61,6 +65,19 @@ function Dashboard() {
       setLoggedIn(status.logged_in);
     }
   }, [status, setBrowserConnected, setLoggedIn]);
+
+  // Refresh comparison data when an operation completes
+  useEffect(() => {
+    // If operation just completed (was running, now null)
+    if (prevOperationRef.current !== null && activeOperation === null) {
+      // Refresh comparison and snapshot data
+      queryClient.invalidateQueries({ queryKey: ['comparison'] });
+      queryClient.invalidateQueries({ queryKey: ['snapshot'] });
+      // Clear selection after unfollow
+      useAppStore.getState().clearSelection();
+    }
+    prevOperationRef.current = activeOperation;
+  }, [activeOperation, queryClient]);
 
   // Mutations
   const loginMutation = useMutation({

@@ -15,7 +15,6 @@ export function QuickActions({
   onCompareStart,
   onUnfollowStart,
 }: QuickActionsProps) {
-  const [dryRun, setDryRun] = useState(true);
   const [maxUnfollows, setMaxUnfollows] = useState(50);
   const [isComparing, setIsComparing] = useState(false);
   const { activeOperation, selectedUsers } = useAppStore();
@@ -35,7 +34,7 @@ export function QuickActions({
       alert('Select users to unfollow first');
       return;
     }
-    onUnfollowStart(targets, dryRun, maxUnfollows);
+    onUnfollowStart(targets, false, maxUnfollows);
   };
 
   const isOperationRunning = activeOperation !== null;
@@ -79,16 +78,6 @@ export function QuickActions({
       </div>
 
       <div className="flex items-center gap-4 pt-2">
-        <label className="flex items-center gap-2 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={dryRun}
-            onChange={(e) => setDryRun(e.target.checked)}
-            className="w-4 h-4 rounded border-zinc-600 bg-zinc-800 text-cyan-500 focus:ring-cyan-500"
-          />
-          <span className="text-sm text-zinc-400">Dry Run Mode</span>
-        </label>
-
         <div className="flex items-center gap-2">
           <span className="text-sm text-zinc-500">Max unfollows:</span>
           <input

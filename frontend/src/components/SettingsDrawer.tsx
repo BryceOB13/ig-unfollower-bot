@@ -15,17 +15,37 @@ interface SettingsDrawerProps {
 }
 
 export function SettingsDrawer({ config, onLogin, onLogout }: SettingsDrawerProps) {
-  const { settingsOpen, setSettingsOpen, loggedIn } = useAppStore();
+  const { settingsOpen, setSettingsOpen, loggedIn, browserConnected } = useAppStore();
   const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   if (!settingsOpen) return null;
 
   const handleLogin = async () => {
     setIsLoggingIn(true);
+    setError(null);
     try {
       await onLogin();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Login failed');
     } finally {
       setIsLoggingIn(false);
+    }
+  };
+
+  const handleVerify = async () => {
+    setIsVerifying(true);
+    setError(null);
+    try {
+      const res = await api.verifyLogin();
+      if (!res.success) {
+        setError('Not logged in yet. Complete login in browser first.');
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Verification failed');
+    } finally {
+      setIsVerifying(false);
     }
   };
 
@@ -65,13 +85,22 @@ export function SettingsDrawer({ config, onLogin, onLogout }: SettingsDrawerProp
 
             <div className="flex gap-2">
               {!loggedIn ? (
-                <button
-                  onClick={handleLogin}
-                  disabled={isLoggingIn}
-                  className="flex-1 px-3 py-2 text-sm font-mono bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 hover:bg-cyan-500/20 disabled:opacity-50 transition-colors"
-                >
-                  {isLoggingIn ? 'Starting...' : 'Login'}
-                </button>
+                <>
+                  <button
+                    onClick={handleLogin}
+                    disabled={isLoggingIn}
+                    className="flex-1 px-3 py-2 text-sm font-mono bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 hover:bg-cyan-500/20 disabled:opacity-50 transition-colors"
+                  >
+                    {isLoggingIn ? 'Starting...' : 'Open Browser'}
+                  </button>
+                  <button
+                    onClick={handleVerify}
+                    disabled={isVerifying}
+                    className="flex-1 px-3 py-2 text-sm font-mono bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20 disabled:opacity-50 transition-colors"
+                  >
+                    {isVerifying ? 'Checking...' : 'Verify Login'}
+                  </button>
+                </>
               ) : (
                 <button
                   onClick={onLogout}
@@ -82,9 +111,15 @@ export function SettingsDrawer({ config, onLogin, onLogout }: SettingsDrawerProp
               )}
             </div>
 
+            {error && (
+              <p className="text-xs text-rose-400">{error}</p>
+            )}
+
             {!loggedIn && (
               <p className="text-xs text-zinc-500">
-                Click Login to open browser. Complete login manually, then verify.
+                1. Click "Open Browser" to launch Chrome<br />
+                2. Log into Instagram in the browser<br />
+                3. Click "Verify Login" to confirm
               </p>
             )}
           </section>

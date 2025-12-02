@@ -16,8 +16,8 @@ export function useWebSocket() {
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/api/ws`;
+    // Connect to backend WebSocket on port 8000
+    const wsUrl = `ws://localhost:8000/api/ws`;
 
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;

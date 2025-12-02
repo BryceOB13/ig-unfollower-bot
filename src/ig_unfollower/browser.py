@@ -17,6 +17,7 @@ from selenium.common.exceptions import (
     NoSuchElementException,
     WebDriverException,
 )
+from webdriver_manager.chrome import ChromeDriverManager
 
 from .config import Config, ConfigManager
 
@@ -59,11 +60,16 @@ class BrowserManager:
         options.add_experimental_option("useAutomationExtension", False)
         
         # Use Chrome profile for session reuse (requirement 1.2)
-        if self.profile_path and os.path.exists(os.path.dirname(self.profile_path)):
-            options.add_argument(f"--user-data-dir={os.path.dirname(self.profile_path)}")
-            options.add_argument(f"--profile-directory={os.path.basename(self.profile_path)}")
+        # Only use profile if path is set and parent directory exists
+        if self.profile_path and self.profile_path.strip():
+            profile_dir = os.path.dirname(self.profile_path)
+            if profile_dir and os.path.exists(profile_dir):
+                options.add_argument(f"--user-data-dir={profile_dir}")
+                options.add_argument(f"--profile-directory={os.path.basename(self.profile_path)}")
         
-        self.driver = webdriver.Chrome(options=options)
+        # Use webdriver-manager to automatically download and manage ChromeDriver
+        service = Service(ChromeDriverManager().install())
+        self.driver = webdriver.Chrome(service=service, options=options)
         
         # Remove webdriver detection
         self.driver.execute_script(

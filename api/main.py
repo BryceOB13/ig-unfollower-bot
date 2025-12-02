@@ -162,7 +162,7 @@ async def login(request: LoginRequest):
     """Start browser and login to Instagram."""
     try:
         if state.browser is None:
-            state.browser = BrowserManager(state.config)
+            state.browser = BrowserManager(config=state.config)
         
         state.browser.start()
         state.browser_connected = True
@@ -261,24 +261,122 @@ async def run_compare_operation(operation_id: str):
                 "message": message,
             }))
         
-        # Get username from config or browser
-        username = state.config.username
-        if not username and state.browser and state.browser.driver:
-            # Try to get from URL or page
-            username = "user"  # Fallback
+        # Get username from config.json or auto-detect from browser
+        username = None
+        try:
+            with open("config.json", "r") as f:
+                data = json.load(f)
+                username = data.get("username")
+        except Exception:
+            pass
         
-        # Create scraper and scrape
-        scraper = InstagramScraper(state.browser, state.config)
+        # Auto-detect username from Instagram if not configured
+        if (not username or not username.strip()) and state.browser and state.browser.driver:
+            logger.info("Username not configured, auto-detecting from Instagram...")
+            try:
+                driver = state.browser.driver
+                # Click on profile link to get username
+                # First try to find the profile link in the navigation
+                username = driver.execute_script("""
+                    // Method 1: Look for profile picture with alt text like "username's profile picture"
+                    const profileImages = document.querySelectorAll('img[alt*="profile picture"]');
+                    for (const img of profileImages) {
+                        const alt = img.getAttribute('alt') || '';
+                        // Extract username from "username's profile picture"
+                        const match = alt.match(/^([a-zA-Z0-9._]+)'s profile picture$/);
+                        if (match && match[1]) {
+                            return match[1];
+                        }
+                    }
+                    
+                    // Method 2: Look for profile link in navigation
+                    const profileLinks = document.querySelectorAll('a[href*="instagram.com/"]');
+                    for (const link of profileLinks) {
+                        const href = link.getAttribute('href') || '';
+                        const match = href.match(/instagram\\.com\\/([a-zA-Z0-9._]+)\\/?$/);
+                        if (match && match[1] && !['explore', 'direct', 'accounts', 'reels', 'stories'].includes(match[1])) {
+                            return match[1];
+                        }
+                    }
+                    
+                    // Method 3: Look for profile link with profile image inside
+                    const navLinks = document.querySelectorAll('a[role="link"]');
+                    for (const link of navLinks) {
+                        const img = link.querySelector('img[alt*="profile picture"]');
+                        if (img) {
+                            const alt = img.getAttribute('alt') || '';
+                            const match = alt.match(/^([a-zA-Z0-9._]+)'s profile picture$/);
+                            if (match && match[1]) {
+                                return match[1];
+                            }
+                        }
+                    }
+                    
+                    return null;
+                """)
+                
+                # If JS detection failed, try clicking profile and getting from URL
+                if not username:
+                    # Try to find and click the profile link
+                    profile_selectors = [
+                        "a[href*='/'][role='link'] svg[aria-label='Profile']",
+                        "span[aria-label='Profile']",
+                        "a[href='/accounts/edit/']",
+                    ]
+                    for selector in profile_selectors:
+                        try:
+                            from selenium.webdriver.common.by import By
+                            from selenium.webdriver.support.ui import WebDriverWait
+                            from selenium.webdriver.support import expected_conditions as EC
+                            
+                            # Find parent link of profile icon
+                            element = WebDriverWait(driver, 3).until(
+                                EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                            )
+                            # Get the parent anchor tag
+                            parent = element.find_element(By.XPATH, "./ancestor::a[@href]")
+                            href = parent.get_attribute("href")
+                            if href:
+                                # Extract username from href like "https://instagram.com/username/"
+                                import re
+                                match = re.search(r'instagram\.com/([a-zA-Z0-9._]+)', href)
+                                if match:
+                                    username = match.group(1)
+                                    break
+                        except Exception:
+                            continue
+                
+                if username:
+                    logger.info(f"Auto-detected username: {username}")
+                    # Save to config for future use
+                    try:
+                        with open("config.json", "r") as f:
+                            config_data = json.load(f)
+                        config_data["username"] = username
+                        with open("config.json", "w") as f:
+                            json.dump(config_data, f, indent=2)
+                        logger.info(f"Saved username '{username}' to config.json")
+                    except Exception as e:
+                        logger.warning(f"Could not save username to config: {e}")
+                        
+            except Exception as e:
+                logger.warning(f"Could not auto-detect username: {e}")
+        
+        if not username or not username.strip():
+            raise ValueError("Username not configured and could not be auto-detected. Please set 'username' in config.json")
+        
+        # Create scraper with username and scrape
+        scraper = InstagramScraper(state.browser, username, state.config)
         
         op["message"] = "Scraping followers..."
         await broadcast({"type": "progress", "operation_id": operation_id, "current": 0, "total": 100, "message": "Scraping followers..."})
         
-        followers = scraper.scrape_followers(username, progress_callback=on_progress)
+        followers = scraper.scrape_followers(progress_callback=on_progress)
         
         op["message"] = "Scraping following..."
         await broadcast({"type": "progress", "operation_id": operation_id, "current": 50, "total": 100, "message": "Scraping following..."})
         
-        following = scraper.scrape_following(username, progress_callback=on_progress)
+        following = scraper.scrape_following(progress_callback=on_progress)
         
         # Create and save snapshot
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -404,6 +502,23 @@ async def run_unfollow_operation(
             "skipped": result.skipped,
         }
         
+        # Remove successfully unfollowed users from the comparison data
+        if result.successful and not dry_run:
+            comparison_path = Path("snapshots") / "latest_comparison.json"
+            if comparison_path.exists():
+                try:
+                    comparison_data = json.loads(comparison_path.read_text())
+                    # Remove unfollowed users from not_following_back list
+                    unfollowed_set = {u.lower() for u in result.successful}
+                    comparison_data["not_following_back"] = [
+                        u for u in comparison_data.get("not_following_back", [])
+                        if u.lower() not in unfollowed_set
+                    ]
+                    comparison_path.write_text(json.dumps(comparison_data, indent=2))
+                    logger.info(f"Removed {len(result.successful)} users from not_following_back list")
+                except Exception as e:
+                    logger.warning(f"Could not update comparison file: {e}")
+        
         state.last_operation = {
             "type": "unfollow",
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -502,8 +617,17 @@ async def get_history():
 @app.get("/api/config")
 async def get_config():
     """Get current configuration."""
+    # Username is stored separately in config.json, not in Config dataclass
+    username = None
+    try:
+        with open("config.json", "r") as f:
+            data = json.load(f)
+            username = data.get("username")
+    except Exception:
+        pass
+    
     return {
-        "username": state.config.username,
+        "username": username,
         "action_delay_min": state.config.action_delay_min,
         "action_delay_max": state.config.action_delay_max,
         "scroll_delay": getattr(state.config, "scroll_delay", 0.5),
