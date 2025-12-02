@@ -76,12 +76,37 @@ export function SettingsDrawer({ config, onLogin, onLogout }: SettingsDrawerProp
               Account
             </h3>
 
-            {config?.username && (
-              <div className="text-sm">
-                <span className="text-zinc-500">Username: </span>
-                <span className="font-mono text-zinc-200">@{config.username}</span>
+            <div className="space-y-2">
+              <label className="block text-sm text-zinc-400">
+                Your Instagram Username:
+              </label>
+              <div className="flex gap-2">
+                <span className="text-zinc-500 py-1">@</span>
+                <input
+                  type="text"
+                  defaultValue={config?.username || ''}
+                  placeholder="your_username"
+                  className="flex-1 px-2 py-1 bg-[#1c1c1f] border border-[#2a2a2d] text-zinc-200 font-mono text-sm"
+                  onBlur={async (e) => {
+                    const newUsername = e.target.value.trim();
+                    if (newUsername && newUsername !== config?.username) {
+                      try {
+                        await fetch('http://localhost:8000/api/config/username', {
+                          method: 'PUT',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ username: newUsername }),
+                        });
+                      } catch (err) {
+                        console.error('Failed to update username:', err);
+                      }
+                    }
+                  }}
+                />
               </div>
-            )}
+              <p className="text-xs text-amber-400">
+                This is the account that will be scraped. Set it to YOUR username.
+              </p>
+            </div>
 
             <div className="flex gap-2">
               {!loggedIn ? (

@@ -193,13 +193,74 @@ async def login(request: LoginRequest):
 
 @app.post("/api/auth/verify", response_model=LoginResponse)
 async def verify_login():
-    """Verify that user is logged in after manual login."""
+    """Verify that user is logged in after manual login and auto-detect username."""
     if state.browser is None or state.browser.driver is None:
         raise HTTPException(status_code=400, detail="Browser not started")
     
     try:
         logged_in = state.browser.is_logged_in()
         state.logged_in = logged_in
+        
+        # Auto-detect username from the Profile link in the sidebar
+        # This is 100% reliable because the Profile link ALWAYS contains YOUR username
+        if logged_in:
+            try:
+                driver = state.browser.driver
+                
+                # The Profile link in Instagram's sidebar has:
+                # 1. An SVG with aria-label="Profile" inside it
+                # 2. An href like "/username/" pointing to YOUR profile
+                # We find the SVG, get its parent <a> tag, and extract the username from href
+                
+                detected_username = driver.execute_script("""
+                    // Find the Profile icon SVG
+                    const profileSvg = document.querySelector('svg[aria-label="Profile"]');
+                    if (!profileSvg) {
+                        console.log('No Profile SVG found');
+                        return null;
+                    }
+                    
+                    // Find the parent <a> tag
+                    let parent = profileSvg.parentElement;
+                    while (parent && parent.tagName !== 'A') {
+                        parent = parent.parentElement;
+                    }
+                    
+                    if (!parent || parent.tagName !== 'A') {
+                        console.log('No parent anchor found');
+                        return null;
+                    }
+                    
+                    // Extract username from href (e.g., "/bryce.o.b/" -> "bryce.o.b")
+                    const href = parent.getAttribute('href') || '';
+                    const match = href.match(/^\\/([a-zA-Z0-9._]+)\\/?$/);
+                    if (match && match[1]) {
+                        return match[1];
+                    }
+                    
+                    console.log('Could not extract username from href:', href);
+                    return null;
+                """)
+                
+                if detected_username:
+                    logger.info(f"Auto-detected username: {detected_username}")
+                    # Update config.json
+                    try:
+                        with open("config.json", "r") as f:
+                            config_data = json.load(f)
+                        if config_data.get("username") != detected_username:
+                            config_data["username"] = detected_username
+                            with open("config.json", "w") as f:
+                                json.dump(config_data, f, indent=2)
+                            logger.info(f"Saved username to config: {detected_username}")
+                    except Exception as e:
+                        logger.warning(f"Could not save username: {e}")
+                else:
+                    logger.warning("Could not auto-detect username from Profile link")
+                    
+            except Exception as e:
+                logger.warning(f"Username detection error: {e}")
+        
         await broadcast({"type": "status_change", "browser": True, "logged_in": logged_in})
         return LoginResponse(
             success=logged_in,
@@ -261,111 +322,25 @@ async def run_compare_operation(operation_id: str):
                 "message": message,
             }))
         
-        # Get username from config.json or auto-detect from browser
+        # Get the LOGGED-IN user's username - NOT the page being viewed
+        # This ensures we always scrape OUR account, not someone else's
+        # Get username from config.json - this is the ONLY source of truth
+        # The username should be set during Verify Login
         username = None
         try:
             with open("config.json", "r") as f:
                 data = json.load(f)
-                username = data.get("username")
+                username = data.get("username", "").strip()
         except Exception:
             pass
         
-        # Auto-detect username from Instagram if not configured
-        if (not username or not username.strip()) and state.browser and state.browser.driver:
-            logger.info("Username not configured, auto-detecting from Instagram...")
-            try:
-                driver = state.browser.driver
-                # Click on profile link to get username
-                # First try to find the profile link in the navigation
-                username = driver.execute_script("""
-                    // Method 1: Look for profile picture with alt text like "username's profile picture"
-                    const profileImages = document.querySelectorAll('img[alt*="profile picture"]');
-                    for (const img of profileImages) {
-                        const alt = img.getAttribute('alt') || '';
-                        // Extract username from "username's profile picture"
-                        const match = alt.match(/^([a-zA-Z0-9._]+)'s profile picture$/);
-                        if (match && match[1]) {
-                            return match[1];
-                        }
-                    }
-                    
-                    // Method 2: Look for profile link in navigation
-                    const profileLinks = document.querySelectorAll('a[href*="instagram.com/"]');
-                    for (const link of profileLinks) {
-                        const href = link.getAttribute('href') || '';
-                        const match = href.match(/instagram\\.com\\/([a-zA-Z0-9._]+)\\/?$/);
-                        if (match && match[1] && !['explore', 'direct', 'accounts', 'reels', 'stories'].includes(match[1])) {
-                            return match[1];
-                        }
-                    }
-                    
-                    // Method 3: Look for profile link with profile image inside
-                    const navLinks = document.querySelectorAll('a[role="link"]');
-                    for (const link of navLinks) {
-                        const img = link.querySelector('img[alt*="profile picture"]');
-                        if (img) {
-                            const alt = img.getAttribute('alt') || '';
-                            const match = alt.match(/^([a-zA-Z0-9._]+)'s profile picture$/);
-                            if (match && match[1]) {
-                                return match[1];
-                            }
-                        }
-                    }
-                    
-                    return null;
-                """)
-                
-                # If JS detection failed, try clicking profile and getting from URL
-                if not username:
-                    # Try to find and click the profile link
-                    profile_selectors = [
-                        "a[href*='/'][role='link'] svg[aria-label='Profile']",
-                        "span[aria-label='Profile']",
-                        "a[href='/accounts/edit/']",
-                    ]
-                    for selector in profile_selectors:
-                        try:
-                            from selenium.webdriver.common.by import By
-                            from selenium.webdriver.support.ui import WebDriverWait
-                            from selenium.webdriver.support import expected_conditions as EC
-                            
-                            # Find parent link of profile icon
-                            element = WebDriverWait(driver, 3).until(
-                                EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-                            )
-                            # Get the parent anchor tag
-                            parent = element.find_element(By.XPATH, "./ancestor::a[@href]")
-                            href = parent.get_attribute("href")
-                            if href:
-                                # Extract username from href like "https://instagram.com/username/"
-                                import re
-                                match = re.search(r'instagram\.com/([a-zA-Z0-9._]+)', href)
-                                if match:
-                                    username = match.group(1)
-                                    break
-                        except Exception:
-                            continue
-                
-                if username:
-                    logger.info(f"Auto-detected username: {username}")
-                    # Save to config for future use
-                    try:
-                        with open("config.json", "r") as f:
-                            config_data = json.load(f)
-                        config_data["username"] = username
-                        with open("config.json", "w") as f:
-                            json.dump(config_data, f, indent=2)
-                        logger.info(f"Saved username '{username}' to config.json")
-                    except Exception as e:
-                        logger.warning(f"Could not save username to config: {e}")
-                        
-            except Exception as e:
-                logger.warning(f"Could not auto-detect username: {e}")
+        if not username:
+            raise ValueError("Username not configured. Please click 'Verify Login' first to detect your username.")
         
-        if not username or not username.strip():
-            raise ValueError("Username not configured and could not be auto-detected. Please set 'username' in config.json")
+        logger.info(f"Starting compare for user: {username}")
         
         # Create scraper with username and scrape
+        # The scraper will navigate to this user's profile
         scraper = InstagramScraper(state.browser, username, state.config)
         
         op["message"] = "Scraping followers..."
@@ -646,6 +621,26 @@ async def update_config(request: ConfigUpdateRequest):
     if request.element_timeout is not None:
         state.config.element_timeout = request.element_timeout
     return {"success": True}
+
+
+class UsernameUpdateRequest(BaseModel):
+    username: str
+
+
+@app.put("/api/config/username")
+async def update_username(request: UsernameUpdateRequest):
+    """Update the target username for scraping."""
+    try:
+        with open("config.json", "r") as f:
+            config_data = json.load(f)
+        config_data["username"] = request.username
+        with open("config.json", "w") as f:
+            json.dump(config_data, f, indent=2)
+        logger.info(f"Username updated to: {request.username}")
+        return {"success": True, "username": request.username}
+    except Exception as e:
+        logger.error(f"Failed to update username: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # WebSocket endpoint
