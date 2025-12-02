@@ -155,7 +155,7 @@ class BrowserManager:
                 self.driver = None
 
     
-    def login(self, username: str | None = None, password: str | None = None) -> bool:
+    def login(self, username: str | None = None, password: str | None = None, manual: bool = False) -> bool:
         """Perform Instagram login with popup handling.
         
         Credentials are read from environment variables if not provided:
@@ -165,6 +165,7 @@ class BrowserManager:
         Args:
             username: Instagram username. Falls back to IG_USERNAME env var.
             password: Instagram password. Falls back to IG_PASSWORD env var.
+            manual: If True, opens login page and waits for manual login.
         
         Returns:
             True if login successful, False otherwise.
@@ -172,12 +173,18 @@ class BrowserManager:
         if self.driver is None:
             raise WebDriverException("Browser not started")
         
+        # Check for manual login mode
+        manual = manual or os.environ.get("IG_MANUAL_LOGIN", "").lower() in ("1", "true", "yes")
+        
+        if manual:
+            return self._manual_login()
+        
         # Get credentials from env vars if not provided
         username = username or os.environ.get("IG_USERNAME")
         password = password or os.environ.get("IG_PASSWORD")
         
         if not username or not password:
-            raise ValueError("Instagram credentials not provided. Set IG_USERNAME and IG_PASSWORD environment variables.")
+            raise ValueError("Instagram credentials not provided. Set IG_USERNAME and IG_PASSWORD environment variables, or use IG_MANUAL_LOGIN=1 for manual login.")
         
         try:
             # Navigate to login page
@@ -223,6 +230,44 @@ class BrowserManager:
             return self._verify_login()
             
         except (TimeoutException, NoSuchElementException) as e:
+            return False
+    
+    def _manual_login(self) -> bool:
+        """Open Instagram and wait for user to manually complete login.
+        
+        Returns:
+            True if login successful after manual intervention.
+        """
+        if self.driver is None:
+            raise WebDriverException("Browser not started")
+        
+        print("\n" + "=" * 60)
+        print("MANUAL LOGIN MODE")
+        print("=" * 60)
+        print("1. The browser will open Instagram's login page")
+        print("2. Please log in manually and complete any verification")
+        print("3. Once you see your Instagram feed, press ENTER here")
+        print("=" * 60 + "\n")
+        
+        # Navigate to Instagram
+        self.driver.get(self.LOGIN_URL)
+        time.sleep(2)
+        
+        # Handle cookie consent if present
+        self._dismiss_cookie_banner()
+        
+        # Wait for user to complete login
+        input("Press ENTER after you've logged in and see your feed...")
+        
+        # Handle any remaining popups
+        self.handle_popups()
+        
+        # Verify login
+        if self._verify_login():
+            print("Login verified successfully!")
+            return True
+        else:
+            print("Login verification failed. Please try again.")
             return False
     
     def handle_popups(self) -> None:

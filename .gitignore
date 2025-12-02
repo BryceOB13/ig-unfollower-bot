@@ -43,11 +43,12 @@ run.sh
 
 # Snapshots and data (contains personal data)
 snapshots/
-*.json
-!pyproject.toml
 
 # Config with potential secrets
 config.json
+
+# Allow example config
+!config.json.example
 
 # Kiro specs (development only)
 .kiro/

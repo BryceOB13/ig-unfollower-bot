@@ -182,13 +182,23 @@ def run_compare_mode(
             logger.error(f"Failed to navigate to profile: {username}")
             return 1
         
-        # Requirement 6.1: Scrape current followers and following lists
+        # Requirement 6.1: Scrape current followers and following lists with progress
+        def progress_callback(current: int, total: int) -> None:
+            """Display real-time progress during scraping."""
+            if total > 0:
+                percent = (current / total) * 100
+                print(f"\rProgress: {current}/{total} ({percent:.1f}%)", end="", flush=True)
+        
         logger.info("Scraping current followers...")
-        followers = scraper.scrape_followers()
+        print("Scraping followers...")
+        followers = scraper.scrape_followers(progress_callback=progress_callback)
+        print()  # New line after progress
         logger.info(f"Found {len(followers)} followers")
         
         logger.info("Scraping current following...")
-        following = scraper.scrape_following()
+        print("Scraping following...")
+        following = scraper.scrape_following(progress_callback=progress_callback)
+        print()  # New line after progress
         logger.info(f"Found {len(following)} following")
         
         # Create new snapshot

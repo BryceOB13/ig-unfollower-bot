@@ -3,7 +3,8 @@
 import logging
 import re
 import time
-from typing import TYPE_CHECKING
+from collections import deque
+from typing import TYPE_CHECKING, Any, Callable
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.remote.webelement import WebElement
@@ -23,6 +24,63 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+class AdaptiveDelayCalculator:
+    """Calculates optimal scroll delays based on content loading performance.
+    
+    Requirements: 1.1, 1.2, 1.3, 1.4, 6.2, 6.3
+    """
+    
+    def __init__(self, min_delay: float = 0.2, max_delay: float = 2.0):
+        """Initialize with delay bounds.
+        
+        Args:
+            min_delay: Minimum delay in seconds (floor).
+            max_delay: Maximum delay in seconds (ceiling).
+        """
+        self.min_delay = min_delay
+        self.max_delay = max_delay
+        self.recent_loads: deque[float] = deque(maxlen=5)  # Rolling window of 5
+    
+    def record_load(self, items_loaded: int, duration: float) -> None:
+        """Record a load measurement for adaptive calculation.
+        
+        Args:
+            items_loaded: Number of items loaded in this iteration.
+            duration: Time taken in seconds.
+        """
+        if duration > 0 and items_loaded >= 0:
+            # Calculate load rate (items per second)
+            load_rate = items_loaded / duration if items_loaded > 0 else 0.1
+            self.recent_loads.append(load_rate)
+    
+    def get_next_delay(self) -> float:
+        """Return optimal delay based on recent load performance.
+        
+        Returns:
+            Delay in seconds, bounded by min_delay and max_delay.
+        """
+        if not self.recent_loads:
+            return self.max_delay  # Conservative start
+        
+        # Calculate average load rate from recent measurements
+        avg_rate = sum(self.recent_loads) / len(self.recent_loads)
+        
+        # Map load rate to delay:
+        # Fast loading (>10 items/sec) -> min delay
+        # Slow loading (<2 items/sec) -> max delay
+        if avg_rate > 10:
+            delay = self.min_delay
+        elif avg_rate > 5:
+            delay = self.min_delay + (self.max_delay - self.min_delay) * 0.25
+        elif avg_rate > 2:
+            delay = self.min_delay + (self.max_delay - self.min_delay) * 0.5
+        else:
+            delay = self.max_delay
+        
+        # Enforce bounds
+        return max(self.min_delay, min(self.max_delay, delay))
 
 
 class InstagramScraper:
@@ -184,157 +242,203 @@ class InstagramScraper:
         
         return scrollable
 
-    def _scroll_modal_to_end(self, modal: WebElement, expected_count: int = 0) -> None:
-        """Scroll modal until all users are loaded or no new content appears.
+    def _scroll_and_extract_unified(
+        self, modal: WebElement, seen_usernames: set[str]
+    ) -> dict[str, Any]:
+        """Single JS call for scroll + extract + end detection.
+        
+        Requirements: 2.1, 2.2, 2.3
+        
+        Args:
+            modal: The modal WebElement.
+            seen_usernames: Set of usernames already collected (lowercase).
+        
+        Returns:
+            Dict with keys: success, scrolled, at_end, new_usernames, scroll_info
+        """
+        seen_list = list(seen_usernames)
+        
+        result = self.driver.execute_script("""
+            const modal = arguments[0];
+            const seenUsernames = new Set(arguments[1].map(u => u.toLowerCase()));
+            
+            // Find scrollable element
+            function findScrollableElement(modal) {
+                const divs = modal.querySelectorAll('div');
+                for (const div of divs) {
+                    const style = div.getAttribute('style') || '';
+                    const computed = window.getComputedStyle(div);
+                    const isScrollable = (
+                        style.includes('overflow: hidden auto') || 
+                        style.includes('overflow-y: auto') ||
+                        style.includes('overflow: auto') ||
+                        computed.overflowY === 'auto' || 
+                        computed.overflowY === 'scroll'
+                    );
+                    if (isScrollable && div.scrollHeight > div.clientHeight) {
+                        return div;
+                    }
+                }
+                return null;
+            }
+            
+            // Extract usernames from current DOM
+            function extractNewUsernames(modal, seenUsernames) {
+                const excludedPaths = new Set([
+                    'explore', 'direct', 'accounts', 'p', 'reel', 
+                    'stories', 'reels', 'tv', 'live', 'tags', 'locations',
+                    'followers', 'following', ''
+                ]);
+                const newUsernames = [];
+                const links = modal.querySelectorAll('a[href^="/"]');
+                
+                for (const link of links) {
+                    const href = link.getAttribute('href');
+                    if (!href) continue;
+                    
+                    let username = href.split('?')[0].replace(/^\\//, '').split('/')[0];
+                    
+                    if (username && 
+                        username.length > 0 && 
+                        username.length <= 30 &&
+                        /^[a-zA-Z0-9._]+$/.test(username) &&
+                        !excludedPaths.has(username.toLowerCase()) &&
+                        !seenUsernames.has(username.toLowerCase())) {
+                        seenUsernames.add(username.toLowerCase());
+                        newUsernames.push(username);
+                    }
+                }
+                return newUsernames;
+            }
+            
+            const scrollable = findScrollableElement(modal);
+            if (!scrollable) {
+                return { success: false, error: 'No scrollable element found', 
+                         scrolled: false, at_end: true, new_usernames: [] };
+            }
+            
+            // Record scroll position before
+            const beforeScroll = scrollable.scrollTop;
+            const scrollHeight = scrollable.scrollHeight;
+            const clientHeight = scrollable.clientHeight;
+            
+            // Perform scroll
+            scrollable.scrollTop = scrollHeight;
+            scrollable.scrollBy(0, 3000);
+            
+            // Check if we actually scrolled
+            const afterScroll = scrollable.scrollTop;
+            const scrolled = afterScroll > beforeScroll;
+            const atEnd = (afterScroll + clientHeight >= scrollHeight - 50);
+            
+            // Extract usernames from current state
+            const newUsernames = extractNewUsernames(modal, seenUsernames);
+            
+            return {
+                success: true,
+                scrolled: scrolled,
+                at_end: atEnd,
+                new_usernames: newUsernames,
+                scroll_info: {
+                    before: beforeScroll,
+                    after: afterScroll,
+                    height: scrollHeight,
+                    client: clientHeight
+                }
+            };
+        """, modal, seen_list)
+        
+        return result
+
+    def _scroll_modal_to_end(
+        self, 
+        modal: WebElement, 
+        expected_count: int = 0,
+        progress_callback: Callable[[int, int], None] | None = None
+    ) -> list[str]:
+        """Scroll modal and extract usernames incrementally with adaptive timing.
+        
+        Requirements: 3.1, 3.2, 3.3, 3.4, 4.1, 4.2, 4.3, 5.1
         
         Args:
             modal: The modal WebElement containing the scrollable list.
             expected_count: Expected number of users to load (from profile display).
+            progress_callback: Optional callback for progress updates (current, total).
+        
+        Returns:
+            List of all extracted usernames.
         """
-        logger.info(f"Starting modal scroll to load all content (expecting ~{expected_count} users)")
+        logger.info(f"Starting optimized modal scroll (expecting ~{expected_count} users)")
         
-        # Wait for initial content to load
-        time.sleep(3)
+        # Wait for initial content to load - need enough time for Instagram
+        time.sleep(2)
         
-        last_count = 0
-        no_change_count = 0
-        max_no_change = 40  # Stop after 40 consecutive scrolls with no new content
+        # Initialize state
+        all_usernames: set[str] = set()
+        delay_calc = AdaptiveDelayCalculator(
+            min_delay=getattr(self.config, 'min_scroll_delay', 0.5),  # Increased min
+            max_delay=getattr(self.config, 'max_scroll_delay', 2.0)
+        )
+        
+        no_new_content_count = 0
+        max_no_new_content = 40  # Stop after 40 consecutive scrolls with no new content
+        target_reached_count = 0
         scroll_iteration = 0
+        max_iterations = 600
+        termination_reason = "unknown"
         
-        # We want 100% of expected count - don't stop early
-        target_count = expected_count if expected_count > 0 else 0
+        # Diagnostic tracking
+        scroll_positions: list[int] = []
+        items_per_iteration: list[int] = []
         
-        while True:
+        while no_new_content_count < max_no_new_content and scroll_iteration < max_iterations:
             scroll_iteration += 1
+            start_time = time.time()
             
-            # Scroll using JavaScript directly on the modal to find and scroll the right element
             try:
-                scroll_result = self.driver.execute_script("""
-                    const modal = arguments[0];
-                    
-                    // Find ALL scrollable containers and scroll them all
-                    const divs = modal.querySelectorAll('div');
-                    let scrolled = false;
-                    
-                    for (const div of divs) {
-                        const style = div.getAttribute('style') || '';
-                        const computed = window.getComputedStyle(div);
-                        
-                        // Check if this div is scrollable
-                        const isScrollable = (
-                            style.includes('overflow: hidden auto') || 
-                            style.includes('overflow-y: auto') ||
-                            style.includes('overflow: auto') ||
-                            computed.overflowY === 'auto' || 
-                            computed.overflowY === 'scroll'
-                        );
-                        
-                        if (isScrollable && div.scrollHeight > div.clientHeight) {
-                            // Scroll this element
-                            div.scrollTop = div.scrollHeight;
-                            div.scrollBy(0, 5000);
-                            scrolled = true;
-                        }
-                    }
-                    
-                    // Count unique usernames (case-insensitive)
-                    const excludedPaths = new Set([
-                        'explore', 'direct', 'accounts', 'p', 'reel', 
-                        'stories', 'reels', 'tv', 'live', 'tags', 'locations',
-                        'followers', 'following', ''
-                    ]);
-                    
-                    const seen = new Set();
-                    const links = modal.querySelectorAll('a[href^="/"]');
-                    
-                    for (const link of links) {
-                        const href = link.getAttribute('href');
-                        if (!href) continue;
-                        
-                        let username = href.split('?')[0].replace(/^\\//, '').split('/')[0];
-                        
-                        if (username && 
-                            username.length > 0 && 
-                            username.length <= 30 &&
-                            /^[a-zA-Z0-9._]+$/.test(username) &&
-                            !excludedPaths.has(username.toLowerCase()) &&
-                            !seen.has(username.toLowerCase())) {
-                            seen.add(username.toLowerCase());
-                        }
-                    }
-                    
-                    return { 
-                        success: scrolled, 
-                        count: seen.size
-                    };
-                """, modal)
+                # Requirement 2.1: Single consolidated JS call
+                result = self._scroll_and_extract_unified(modal, all_usernames)
                 
-                if not scroll_result.get('success', False):
-                    # Try scrolling up then down to trigger loading
-                    self.driver.execute_script("""
-                        const modal = arguments[0];
-                        const divs = modal.querySelectorAll('div');
-                        for (const div of divs) {
-                            if (div.scrollHeight > div.clientHeight) {
-                                div.scrollTop = 0;
-                            }
-                        }
-                    """, modal)
-                    time.sleep(0.5)
-                    self.driver.execute_script("""
-                        const modal = arguments[0];
-                        const divs = modal.querySelectorAll('div');
-                        for (const div of divs) {
-                            if (div.scrollHeight > div.clientHeight) {
-                                div.scrollTop = div.scrollHeight;
-                            }
-                        }
-                    """, modal)
-                    
-                current_count = scroll_result.get('count', 0)
+                if not result.get('success', False):
+                    logger.warning(f"Scroll failed: {result.get('error', 'Unknown error')}")
+                    time.sleep(1)
+                    continue
                 
-            except StaleElementReferenceException:
-                logger.warning("Modal became stale during scroll")
-                break
-            except Exception as e:
-                logger.warning(f"Scroll error: {e}, continuing...")
-                time.sleep(1)
-                continue
-            
-            # Wait for content to load - Instagram needs time to fetch
-            time.sleep(self.config.scroll_delay)
-            
-            # Log progress every 5 iterations
-            if scroll_iteration % 5 == 0:
-                logger.info(f"Scroll progress: loaded {current_count}/{expected_count} users (iteration {scroll_iteration})")
-            
-            # Check if we've reached the target (100%)
-            if target_count > 0 and current_count >= target_count:
-                logger.info(f"Reached target count: {current_count} >= {target_count}")
-                # Do a few more scrolls to make sure we got everything
-                for _ in range(5):
-                    time.sleep(self.config.scroll_delay)
-                    try:
-                        self.driver.execute_script("""
-                            const modal = arguments[0];
-                            const divs = modal.querySelectorAll('div');
-                            for (const div of divs) {
-                                if (div.scrollHeight > div.clientHeight) {
-                                    div.scrollTop = div.scrollHeight;
-                                }
-                            }
-                        """, modal)
-                    except:
-                        pass
-                break
-            
-            if current_count == last_count:
-                no_change_count += 1
+                # Track scroll position for diagnostics
+                scroll_info = result.get('scroll_info', {})
+                current_scroll_pos = scroll_info.get('after', 0)
+                scroll_positions.append(current_scroll_pos)
                 
-                # Every 10 failed attempts, try scrolling up then down to trigger loading
-                if no_change_count % 10 == 0 and no_change_count < max_no_change:
-                    logger.info(f"Trying scroll reset to trigger more loading...")
-                    try:
+                # Requirement 3.1, 3.2: Incremental collection with deduplication
+                new_usernames = result.get('new_usernames', [])
+                before_count = len(all_usernames)
+                for username in new_usernames:
+                    all_usernames.add(username.lower())
+                items_loaded = len(all_usernames) - before_count
+                items_per_iteration.append(items_loaded)
+                
+                # Record performance for adaptive delay
+                duration = time.time() - start_time
+                delay_calc.record_load(items_loaded, duration)
+                
+                # Requirement 5.1: Progress callback
+                if progress_callback:
+                    progress_callback(len(all_usernames), expected_count)
+                
+                # Log progress every 5 iterations with diagnostics
+                if scroll_iteration % 5 == 0:
+                    logger.info(
+                        f"Scroll #{scroll_iteration}: {len(all_usernames)}/{expected_count} users | "
+                        f"no_new={no_new_content_count} | scroll_pos={current_scroll_pos} | "
+                        f"new_this_iter={items_loaded}"
+                    )
+                
+                # Track no new content - this is the main termination condition
+                if items_loaded == 0:
+                    no_new_content_count += 1
+                    # Every 10 failed attempts, try scrolling up then down
+                    if no_new_content_count % 10 == 0:
+                        logger.info(f"Scroll reset attempt (no_new_content={no_new_content_count})")
                         self.driver.execute_script("""
                             const modal = arguments[0];
                             const divs = modal.querySelectorAll('div');
@@ -344,7 +448,7 @@ class InstagramScraper:
                                 }
                             }
                         """, modal)
-                        time.sleep(1)
+                        time.sleep(1.5)
                         self.driver.execute_script("""
                             const modal = arguments[0];
                             const divs = modal.querySelectorAll('div');
@@ -354,24 +458,210 @@ class InstagramScraper:
                                 }
                             }
                         """, modal)
-                    except:
-                        pass
+                        time.sleep(1)
+                else:
+                    no_new_content_count = 0  # Reset on any new content
                 
-                if no_change_count >= max_no_change:
-                    logger.info(f"No more content loading after {no_change_count} attempts (got {current_count}/{expected_count})")
-                    break
-            else:
-                no_change_count = 0
-                logger.debug(f"Loaded more users: {last_count} -> {current_count}")
-            
-            last_count = current_count
-            
-            # Safety limit to prevent infinite loops
-            if scroll_iteration > 600:
-                logger.warning("Reached maximum scroll iterations (600)")
+                # Early termination only if we have 100% of expected
+                if expected_count > 0 and len(all_usernames) >= expected_count:
+                    target_reached_count += 1
+                    if target_reached_count >= 5:
+                        termination_reason = f"target_reached ({len(all_usernames)} >= {expected_count})"
+                        break
+                else:
+                    target_reached_count = 0
+                
+                # Use config scroll delay
+                delay = self.config.scroll_delay
+                time.sleep(delay)
+                
+            except StaleElementReferenceException:
+                logger.warning("Modal became stale during scroll")
+                termination_reason = "stale_element"
                 break
+            except Exception as e:
+                logger.warning(f"Scroll error: {e}")
+                time.sleep(0.5)
+                continue
         
-        logger.info(f"Finished scrolling modal - loaded {last_count} users (expected {expected_count})")
+        # Determine termination reason if not already set
+        if termination_reason == "unknown":
+            if no_new_content_count >= max_no_new_content:
+                termination_reason = f"no_new_content ({no_new_content_count} consecutive)"
+            elif scroll_iteration >= max_iterations:
+                termination_reason = f"max_iterations ({max_iterations})"
+        
+        # SWEEP PHASE: If we didn't get enough users, do a slow scroll back up to catch missed ones
+        completeness = (len(all_usernames) / expected_count * 100) if expected_count > 0 else 100
+        if completeness < 95 and expected_count > 0:
+            logger.info(f"Starting SWEEP phase - only {completeness:.1f}% complete, looking for missed users...")
+            sweep_found = self._sweep_for_missed_users(modal, all_usernames, expected_count)
+            logger.info(f"Sweep found {sweep_found} additional users")
+            completeness = (len(all_usernames) / expected_count * 100) if expected_count > 0 else 100
+        
+        # Generate diagnostic report
+        logger.info("=" * 60)
+        logger.info("SCROLL TERMINATION REPORT")
+        logger.info("=" * 60)
+        logger.info(f"Termination reason: {termination_reason}")
+        logger.info(f"Total iterations: {scroll_iteration}")
+        logger.info(f"Users collected: {len(all_usernames)}/{expected_count} ({completeness:.1f}%)")
+        logger.info(f"Final no_new_content_count: {no_new_content_count}")
+        if scroll_positions:
+            logger.info(f"Final scroll position: {scroll_positions[-1]}")
+            if len(scroll_positions) >= 10:
+                last_10_positions = scroll_positions[-10:]
+                if len(set(last_10_positions)) == 1:
+                    logger.info("WARNING: Scroll position unchanged for last 10 iterations!")
+        if items_per_iteration:
+            recent_items = items_per_iteration[-20:] if len(items_per_iteration) >= 20 else items_per_iteration
+            logger.info(f"Items loaded in last {len(recent_items)} iterations: {recent_items}")
+        logger.info("=" * 60)
+        
+        # Remove own username if present
+        all_usernames.discard(self.username.lower())
+        
+        final_usernames = list(all_usernames)
+        logger.info(f"Optimized scroll complete: {len(final_usernames)} users in {scroll_iteration} iterations")
+        
+        return final_usernames
+    
+    def _sweep_for_missed_users(
+        self, 
+        modal: WebElement, 
+        all_usernames: set[str], 
+        expected_count: int
+    ) -> int:
+        """Slowly scroll back through the list to catch any missed users.
+        
+        Instagram's virtual scrolling can skip elements when scrolling fast.
+        This method scrolls slowly in both directions to catch missed users.
+        
+        Args:
+            modal: The modal WebElement.
+            all_usernames: Set of already collected usernames (will be modified).
+            expected_count: Expected total count.
+        
+        Returns:
+            Number of new users found during sweep.
+        """
+        initial_count = len(all_usernames)
+        
+        try:
+            # First, scroll to top
+            logger.info("Sweep: Scrolling to top...")
+            self.driver.execute_script("""
+                const modal = arguments[0];
+                const divs = modal.querySelectorAll('div');
+                for (const div of divs) {
+                    if (div.scrollHeight > div.clientHeight) {
+                        div.scrollTop = 0;
+                    }
+                }
+            """, modal)
+            time.sleep(2)
+            
+            # Extract any users visible at top
+            result = self._scroll_and_extract_unified(modal, all_usernames)
+            if result.get('success'):
+                for username in result.get('new_usernames', []):
+                    all_usernames.add(username.lower())
+            
+            # Get scroll height for calculating increments
+            scroll_info = self.driver.execute_script("""
+                const modal = arguments[0];
+                const divs = modal.querySelectorAll('div');
+                for (const div of divs) {
+                    if (div.scrollHeight > div.clientHeight) {
+                        return { height: div.scrollHeight, client: div.clientHeight };
+                    }
+                }
+                return { height: 0, client: 0 };
+            """, modal)
+            
+            scroll_height = scroll_info.get('height', 0)
+            client_height = scroll_info.get('client', 400)
+            
+            if scroll_height == 0:
+                return len(all_usernames) - initial_count
+            
+            # Sweep down slowly - smaller increments than normal scrolling
+            increment = client_height // 2  # Half a screen at a time
+            current_pos = 0
+            sweep_iterations = 0
+            max_sweep_iterations = 100
+            
+            logger.info(f"Sweep: Scrolling down slowly (increment={increment}px)...")
+            
+            while current_pos < scroll_height and sweep_iterations < max_sweep_iterations:
+                sweep_iterations += 1
+                current_pos += increment
+                
+                self.driver.execute_script("""
+                    const modal = arguments[0];
+                    const targetPos = arguments[1];
+                    const divs = modal.querySelectorAll('div');
+                    for (const div of divs) {
+                        if (div.scrollHeight > div.clientHeight) {
+                            div.scrollTop = targetPos;
+                        }
+                    }
+                """, modal, current_pos)
+                
+                # Longer delay to let content render
+                time.sleep(0.8)
+                
+                # Extract users at this position
+                result = self._scroll_and_extract_unified(modal, all_usernames)
+                if result.get('success'):
+                    new_users = result.get('new_usernames', [])
+                    for username in new_users:
+                        all_usernames.add(username.lower())
+                    if new_users:
+                        logger.debug(f"Sweep found {len(new_users)} new users at position {current_pos}")
+                
+                # Check if we've reached target
+                if len(all_usernames) >= expected_count:
+                    logger.info(f"Sweep: Reached target count {len(all_usernames)}>={expected_count}")
+                    break
+            
+            # One more sweep back up with different cadence
+            if len(all_usernames) < expected_count * 0.98:
+                logger.info("Sweep: Second pass scrolling up...")
+                current_pos = scroll_height
+                
+                while current_pos > 0 and sweep_iterations < max_sweep_iterations * 2:
+                    sweep_iterations += 1
+                    current_pos -= int(increment * 1.5)  # Different cadence going up
+                    current_pos = max(0, current_pos)
+                    
+                    self.driver.execute_script("""
+                        const modal = arguments[0];
+                        const targetPos = arguments[1];
+                        const divs = modal.querySelectorAll('div');
+                        for (const div of divs) {
+                            if (div.scrollHeight > div.clientHeight) {
+                                div.scrollTop = targetPos;
+                            }
+                        }
+                    """, modal, current_pos)
+                    
+                    time.sleep(0.6)
+                    
+                    result = self._scroll_and_extract_unified(modal, all_usernames)
+                    if result.get('success'):
+                        for username in result.get('new_usernames', []):
+                            all_usernames.add(username.lower())
+                    
+                    if len(all_usernames) >= expected_count:
+                        break
+            
+        except Exception as e:
+            logger.warning(f"Sweep error: {e}")
+        
+        found = len(all_usernames) - initial_count
+        logger.info(f"Sweep complete: found {found} additional users")
+        return found
     
     def _extract_usernames_from_modal(self, modal: WebElement) -> list[str]:
         """Extract all usernames from modal list items.
@@ -506,10 +796,16 @@ class InstagramScraper:
 
     
     @retry_with_backoff(max_retries=3)
-    def scrape_followers(self) -> list[str]:
+    def scrape_followers(
+        self, 
+        progress_callback: Callable[[int, int], None] | None = None
+    ) -> list[str]:
         """Open followers modal, scroll to load all, extract usernames.
         
-        Requirements: 2.1, 2.2, 2.3, 2.4, 2.5
+        Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 5.1, 7.1
+        
+        Args:
+            progress_callback: Optional callback for progress updates (current, total).
         
         Returns:
             List of follower usernames.
@@ -517,7 +813,7 @@ class InstagramScraper:
         Raises:
             RuntimeError: If modal cannot be opened or scraping fails.
         """
-        logger.info(f"Starting followers scrape for {self.username}")
+        logger.info(f"Starting optimized followers scrape for {self.username}")
         
         # Ensure we're on the profile page
         if self.username not in self.driver.current_url:
@@ -532,11 +828,12 @@ class InstagramScraper:
             raise RuntimeError("Failed to open followers modal")
         
         try:
-            # Requirement 2.2: Scroll repeatedly until all followers are loaded
-            self._scroll_modal_to_end(modal, expected_count=followers_count)
-            
-            # Requirement 2.3, 2.4: Extract all follower usernames
-            usernames = self._extract_usernames_from_modal(modal)
+            # Requirement 3.4: Scroll and extract incrementally, return directly
+            usernames = self._scroll_modal_to_end(
+                modal, 
+                expected_count=followers_count,
+                progress_callback=progress_callback
+            )
             
             logger.info(f"Scraped {len(usernames)} followers (expected {followers_count})")
             return usernames
@@ -546,10 +843,16 @@ class InstagramScraper:
             self._close_modal()
     
     @retry_with_backoff(max_retries=3)
-    def scrape_following(self) -> list[str]:
+    def scrape_following(
+        self, 
+        progress_callback: Callable[[int, int], None] | None = None
+    ) -> list[str]:
         """Open following modal, scroll to load all, extract usernames.
         
-        Requirements: 3.1, 3.2, 3.3, 3.4, 3.5
+        Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 5.1, 7.2
+        
+        Args:
+            progress_callback: Optional callback for progress updates (current, total).
         
         Returns:
             List of following usernames.
@@ -557,7 +860,7 @@ class InstagramScraper:
         Raises:
             RuntimeError: If modal cannot be opened or scraping fails.
         """
-        logger.info(f"Starting following scrape for {self.username}")
+        logger.info(f"Starting optimized following scrape for {self.username}")
         
         # Ensure we're on the profile page
         if self.username not in self.driver.current_url:
@@ -572,11 +875,12 @@ class InstagramScraper:
             raise RuntimeError("Failed to open following modal")
         
         try:
-            # Requirement 3.2: Scroll repeatedly until all following are loaded
-            self._scroll_modal_to_end(modal, expected_count=following_count)
-            
-            # Requirement 3.3, 3.4: Extract all following usernames
-            usernames = self._extract_usernames_from_modal(modal)
+            # Requirement 3.4: Scroll and extract incrementally, return directly
+            usernames = self._scroll_modal_to_end(
+                modal, 
+                expected_count=following_count,
+                progress_callback=progress_callback
+            )
             
             logger.info(f"Scraped {len(usernames)} following (expected {following_count})")
             return usernames
