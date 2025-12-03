@@ -45,6 +45,8 @@ run.sh
 snapshots/
 unfollowed_history.json
 unfollow.txt
+profile.txt
+skip_list.json
 
 # Config with potential secrets
 config.json

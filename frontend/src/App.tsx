@@ -66,6 +66,17 @@ function Dashboard() {
     }
   }, [status, setBrowserConnected, setLoggedIn]);
 
+  // Watch for username changes and refresh comparison data
+  const prevUsernameRef = React.useRef(config?.username);
+  useEffect(() => {
+    if (config?.username && config.username !== prevUsernameRef.current) {
+      // Username changed - refresh comparison and snapshot data
+      queryClient.invalidateQueries({ queryKey: ['comparison'] });
+      queryClient.invalidateQueries({ queryKey: ['snapshot'] });
+      prevUsernameRef.current = config.username;
+    }
+  }, [config?.username, queryClient]);
+
   // Refresh comparison data when an operation completes
   useEffect(() => {
     // If operation just completed (was running, now null)
@@ -138,6 +149,8 @@ function Dashboard() {
   });
 
   const handleCompareStart = () => {
+    // Reset unfollowed count when starting a new comparison
+    useAppStore.getState().resetUnfollowedCount();
     compareMutation.mutate();
   };
 

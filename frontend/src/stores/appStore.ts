@@ -14,6 +14,9 @@ interface AppState {
   activeTab: 'not-following-back' | 'unfollowers' | 'new-followers' | 'skip-list';
   settingsOpen: boolean;
 
+  // Tracking
+  unfollowedCount: number;
+
   // Actions
   setBrowserConnected: (connected: boolean) => void;
   setLoggedIn: (loggedIn: boolean) => void;
@@ -24,6 +27,8 @@ interface AppState {
   clearSelection: () => void;
   setActiveTab: (tab: AppState['activeTab']) => void;
   setSettingsOpen: (open: boolean) => void;
+  addUnfollowedCount: (count: number) => void;
+  resetUnfollowedCount: () => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -33,6 +38,7 @@ export const useAppStore = create<AppState>((set) => ({
   selectedUsers: new Set(),
   activeTab: 'not-following-back',
   settingsOpen: false,
+  unfollowedCount: 0,
 
   setBrowserConnected: (connected) => set({ browserConnected: connected }),
   setLoggedIn: (loggedIn) => set({ loggedIn }),
@@ -65,4 +71,9 @@ export const useAppStore = create<AppState>((set) => ({
   setActiveTab: (tab) => set({ activeTab: tab }),
 
   setSettingsOpen: (open) => set({ settingsOpen: open }),
+
+  addUnfollowedCount: (count) =>
+    set((state) => ({ unfollowedCount: state.unfollowedCount + count })),
+
+  resetUnfollowedCount: () => set({ unfollowedCount: 0 }),
 }));

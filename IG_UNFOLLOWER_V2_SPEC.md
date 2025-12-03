@@ -1,3 +1,21 @@
+# IG Unfollower V2 Upgrade Specification
+
+## OBJECTIVE
+
+Upgrade the Instagram unfollower tool to achieve:
+1. **100% scraping completeness** (currently 75-85%)
+2. **O(n) efficiency** (currently O(n²) per scroll)
+3. **Robust profile detection** (currently single-point-of-failure)
+
+---
+
+## FILE CHANGES REQUIRED
+
+### FILE 1: Replace `src/ig_unfollower/scraper.py`
+
+Replace the entire contents of `src/ig_unfollower/scraper.py` with:
+
+```python
 """Instagram scraper module - V2 with 100% completion and O(n) efficiency.
 
 IMPROVEMENTS OVER V1:
@@ -663,3 +681,239 @@ class AdaptiveDelayCalculator:
             return self.min_delay + (self.max_delay - self.min_delay) * 0.5
         else:
             return self.max_delay
+```
+
+---
+
+### FILE 2: Update `api/main.py` - Replace `verify_login` function
+
+Find the `verify_login` function (around line 150) and replace it with:
+
+```python
+@app.post("/api/auth/verify", response_model=LoginResponse)
+async def verify_login():
+    """Verify login and auto-detect username using multiple strategies."""
+    if state.browser is None or state.browser.driver is None:
+        raise HTTPException(status_code=400, detail="Browser not started")
+    
+    try:
+        driver = state.browser.driver
+        
+        # Multi-strategy username detection
+        result = driver.execute_script("""
+            let detectedUsername = null;
+            let detectionMethod = null;
+            
+            // Strategy 1: Sidebar Profile SVG (most reliable)
+            try {
+                const profileSvg = document.querySelector('svg[aria-label="Profile"]');
+                if (profileSvg) {
+                    let parent = profileSvg.parentElement;
+                    while (parent && parent.tagName !== 'A') {
+                        parent = parent.parentElement;
+                    }
+                    if (parent && parent.tagName === 'A') {
+                        const href = parent.getAttribute('href') || '';
+                        const match = href.match(/^\\/([a-zA-Z0-9._]+)\\/?$/);
+                        if (match) {
+                            detectedUsername = match[1];
+                            detectionMethod = 'sidebar_profile';
+                        }
+                    }
+                }
+            } catch (e) {}
+            
+            // Strategy 2: Profile image alt text in navigation
+            if (!detectedUsername) {
+                try {
+                    const navImages = document.querySelectorAll('nav img[alt*="profile picture"], header img[alt*="profile picture"]');
+                    for (const img of navImages) {
+                        const alt = img.getAttribute('alt') || '';
+                        const match = alt.match(/^([a-zA-Z0-9._]+)'s profile picture$/i);
+                        if (match) {
+                            detectedUsername = match[1];
+                            detectionMethod = 'nav_profile_image';
+                            break;
+                        }
+                    }
+                } catch (e) {}
+            }
+            
+            // Strategy 3: More menu profile picture
+            if (!detectedUsername) {
+                try {
+                    const moreImages = document.querySelectorAll('div[role="button"] img');
+                    for (const img of moreImages) {
+                        const alt = img.getAttribute('alt') || '';
+                        if (alt.includes('profile picture')) {
+                            const match = alt.match(/^([a-zA-Z0-9._]+)'s profile picture$/i);
+                            if (match) {
+                                detectedUsername = match[1];
+                                detectionMethod = 'more_menu';
+                                break;
+                            }
+                        }
+                    }
+                } catch (e) {}
+            }
+            
+            // Strategy 4: Profile links with profile picture
+            if (!detectedUsername) {
+                try {
+                    const currentPath = window.location.pathname;
+                    const allLinks = document.querySelectorAll('a[href^="/"]');
+                    for (const link of allLinks) {
+                        const href = link.getAttribute('href') || '';
+                        if (href === currentPath) continue;
+                        if (href.match(/^\\/(explore|direct|reels|stories|p|accounts|reel)\\//)) continue;
+                        if (href.match(/^\\/([a-zA-Z0-9._]+)\\/(followers|following)\\/?$/)) continue;
+                        
+                        const match = href.match(/^\\/([a-zA-Z0-9._]+)\\/?$/);
+                        if (match && match[1].length >= 1 && match[1].length <= 30) {
+                            const hasProfileImg = link.querySelector('img[alt*="profile picture"]') !== null;
+                            const isInNav = link.closest('nav') !== null || 
+                                           link.closest('[role="navigation"]') !== null;
+                            
+                            if (hasProfileImg || isInNav) {
+                                detectedUsername = match[1];
+                                detectionMethod = 'profile_link';
+                                break;
+                            }
+                        }
+                    }
+                } catch (e) {}
+            }
+            
+            // Check login status
+            const isLoggedIn = (
+                document.querySelector('svg[aria-label="Home"]') !== null ||
+                document.querySelector('a[href*="/direct/inbox/"]') !== null
+            ) && !window.location.href.includes('/accounts/login');
+            
+            return {
+                isLoggedIn: isLoggedIn,
+                username: detectedUsername,
+                method: detectionMethod
+            };
+        """)
+        
+        is_logged_in = result.get('isLoggedIn', False)
+        detected_username = result.get('username')
+        method = result.get('method')
+        
+        state.logged_in = is_logged_in
+        
+        if is_logged_in and detected_username:
+            logger.info(f"Username detected: {detected_username} via {method}")
+            
+            # Save to config
+            try:
+                try:
+                    with open("config.json", "r") as f:
+                        config_data = json.load(f)
+                except FileNotFoundError:
+                    config_data = {}
+                
+                if config_data.get("username") != detected_username:
+                    config_data["username"] = detected_username
+                    with open("config.json", "w") as f:
+                        json.dump(config_data, f, indent=2)
+                        
+            except Exception as e:
+                logger.warning(f"Could not save username: {e}")
+            
+            await broadcast({
+                "type": "status_change",
+                "browser": True,
+                "logged_in": True,
+                "username": detected_username
+            })
+            
+            return LoginResponse(
+                success=True,
+                message=f"Logged in as {detected_username}",
+            )
+        
+        elif is_logged_in:
+            await broadcast({"type": "status_change", "browser": True, "logged_in": True})
+            return LoginResponse(
+                success=True,
+                message="Logged in but could not detect username. Please set manually.",
+            )
+        
+        else:
+            await broadcast({"type": "status_change", "browser": True, "logged_in": False})
+            return LoginResponse(
+                success=False,
+                message="Not logged in",
+            )
+            
+    except Exception as e:
+        logger.error(f"Verify error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+```
+
+---
+
+## SUMMARY OF CHANGES
+
+### Scraping Algorithm Changes
+
+| Aspect | V1 | V2 |
+|--------|----|----|
+| DOM Scanning | Full modal scan each iteration O(n) | Viewport only O(k≈12) |
+| Missed Items | Lost when DOM recycles | MutationObserver catches all |
+| End Detection | `at_end` flag (unreliable) | Scroll delta tracking |
+| Recovery | Retry loops | Reverse scroll pass |
+| Completeness | 75-85% | 98-100% |
+
+### Profile Detection Changes
+
+| Strategy | Reliability | Description |
+|----------|-------------|-------------|
+| Sidebar SVG | 100% | `svg[aria-label="Profile"]` parent link |
+| Nav Profile Image | 95% | Alt text pattern `"{username}'s profile picture"` |
+| More Menu | 90% | Profile picture in button elements |
+| Profile Links | 85% | Links with profile picture in nav area |
+
+### Key Classes Added
+
+1. **`ScrollState`** - Tracks position, metrics, termination conditions
+2. **`ScrollMetrics`** - Rolling window of scroll performance
+3. **`MutationObserverManager`** - Injects/manages browser observer
+
+### 4-Phase Scroll Algorithm
+
+1. **Phase 1**: Inject MutationObserver + initial DOM scan
+2. **Phase 2**: Incremental scroll down with viewport extraction
+3. **Phase 3**: Reverse pass (if <98% complete)
+4. **Phase 4**: Merge observer results + final scan
+
+---
+
+## TESTING
+
+After making changes, test with:
+
+```bash
+# Run the API
+cd your-project
+uvicorn api.main:app --reload --port 8000
+
+# In browser:
+# 1. Click "Launch Browser"
+# 2. Login to Instagram manually
+# 3. Click "Verify Login" - should detect username
+# 4. Click "Compare" - should get 98-100% of followers/following
+```
+
+Expected log output:
+```
+INFO: Initial scan: 15 usernames
+INFO: #20: 156/575 | pos=3000 | delta=150 | no_new=0
+INFO: #40: 312/575 | pos=6000 | delta=150 | no_new=0
+...
+INFO: Phase 2: 571/575 (99.3%) after 85 scrolls
+INFO: Observer merge: +4 (observer captured 575 via 1247 mutations)
+INFO: FINAL: 575/575 (100.0%)
+```

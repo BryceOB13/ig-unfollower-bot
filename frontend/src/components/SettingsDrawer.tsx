@@ -9,6 +9,7 @@ interface SettingsDrawerProps {
     action_delay_min: number;
     action_delay_max: number;
     element_timeout: number;
+    available_accounts?: string[];
   };
   onLogin: () => void;
   onLogout: () => void;
@@ -19,6 +20,8 @@ export function SettingsDrawer({ config, onLogin, onLogout }: SettingsDrawerProp
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showAccountDropdown, setShowAccountDropdown] = useState(false);
+  const [usernameInput, setUsernameInput] = useState(config?.username || '');
 
   if (!settingsOpen) return null;
 
@@ -76,32 +79,72 @@ export function SettingsDrawer({ config, onLogin, onLogout }: SettingsDrawerProp
               Account
             </h3>
 
-            <div className="space-y-2">
+            <div className="space-y-2 relative">
               <label className="block text-sm text-zinc-400">
                 Your Instagram Username:
               </label>
               <div className="flex gap-2">
                 <span className="text-zinc-500 py-1">@</span>
-                <input
-                  type="text"
-                  defaultValue={config?.username || ''}
-                  placeholder="your_username"
-                  className="flex-1 px-2 py-1 bg-[#1c1c1f] border border-[#2a2a2d] text-zinc-200 font-mono text-sm"
-                  onBlur={async (e) => {
-                    const newUsername = e.target.value.trim();
-                    if (newUsername && newUsername !== config?.username) {
-                      try {
-                        await fetch('http://localhost:8000/api/config/username', {
-                          method: 'PUT',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ username: newUsername }),
-                        });
-                      } catch (err) {
-                        console.error('Failed to update username:', err);
-                      }
-                    }
-                  }}
-                />
+                <div className="flex-1 relative">
+                  <input
+                    type="text"
+                    value={usernameInput}
+                    placeholder="your_username"
+                    className="w-full px-2 py-1 bg-[#1c1c1f] border border-[#2a2a2d] text-zinc-200 font-mono text-sm"
+                    onChange={(e) => {
+                      setUsernameInput(e.target.value);
+                      setShowAccountDropdown(true);
+                    }}
+                    onFocus={() => setShowAccountDropdown(true)}
+                    onBlur={async (e) => {
+                      // Delay to allow dropdown click
+                      setTimeout(async () => {
+                        setShowAccountDropdown(false);
+                        const newUsername = e.target.value.trim();
+                        if (newUsername && newUsername !== config?.username) {
+                          try {
+                            await fetch('http://localhost:8000/api/config/username', {
+                              method: 'PUT',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ username: newUsername }),
+                            });
+                          } catch (err) {
+                            console.error('Failed to update username:', err);
+                          }
+                        }
+                      }, 200);
+                    }}
+                  />
+                  
+                  {/* Dropdown for available accounts */}
+                  {showAccountDropdown && config?.available_accounts && config.available_accounts.length > 0 && (
+                    <div className="absolute top-full left-0 right-0 mt-1 bg-[#1c1c1f] border border-[#2a2a2d] rounded shadow-lg z-10 max-h-40 overflow-y-auto">
+                      {config.available_accounts
+                        .filter(account => 
+                          account.toLowerCase().includes(usernameInput.toLowerCase())
+                        )
+                        .map(account => (
+                          <button
+                            key={account}
+                            className="w-full px-3 py-2 text-left text-sm font-mono text-zinc-300 hover:bg-[#2a2a2d] transition-colors"
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              setUsernameInput(account);
+                              setShowAccountDropdown(false);
+                              // Update username
+                              fetch('http://localhost:8000/api/config/username', {
+                                method: 'PUT',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ username: account }),
+                              }).catch(err => console.error('Failed to update username:', err));
+                            }}
+                          >
+                            @{account}
+                          </button>
+                        ))}
+                    </div>
+                  )}
+                </div>
               </div>
               <p className="text-xs text-amber-400">
                 This is the account that will be scraped. Set it to YOUR username.

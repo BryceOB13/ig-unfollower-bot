@@ -1,16 +1,19 @@
 import { useEffect, useRef, useCallback } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useAppStore } from '../stores/appStore';
 import type { WSMessage } from '../types';
 
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<number>();
+  const queryClient = useQueryClient();
 
   const {
     setBrowserConnected,
     setLoggedIn,
     updateOperationProgress,
     setActiveOperation,
+    addUnfollowedCount,
   } = useAppStore();
 
   const connect = useCallback(() => {
@@ -46,6 +49,15 @@ export function useWebSocket() {
             setActiveOperation(null);
             break;
 
+          case 'comparison_updated':
+            // Refresh comparison data when unfollows complete
+            queryClient.invalidateQueries({ queryKey: ['comparison'] });
+            // Track unfollowed count
+            if (msg.removed_count) {
+              addUnfollowedCount(msg.removed_count);
+            }
+            break;
+
           case 'heartbeat':
             // Ignore heartbeats
             break;
@@ -63,7 +75,7 @@ export function useWebSocket() {
     ws.onerror = (error) => {
       console.error('WebSocket error:', error);
     };
-  }, [setBrowserConnected, setLoggedIn, updateOperationProgress, setActiveOperation]);
+  }, [setBrowserConnected, setLoggedIn, updateOperationProgress, setActiveOperation, queryClient, addUnfollowedCount]);
 
   useEffect(() => {
     connect();

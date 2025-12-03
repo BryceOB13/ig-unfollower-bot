@@ -18,12 +18,14 @@ class Snapshot:
         following: List of following usernames
         followers_count: Number of followers
         following_count: Number of following
+        username: Instagram username this snapshot belongs to
     """
     timestamp: str
     followers: list[str] = field(default_factory=list)
     following: list[str] = field(default_factory=list)
     followers_count: int = 0
     following_count: int = 0
+    username: Optional[str] = None
     
     def __post_init__(self):
         """Validate and set counts if not provided."""
@@ -64,7 +66,8 @@ class SnapshotManager:
             "followers": snapshot.followers,
             "following": snapshot.following,
             "followers_count": snapshot.followers_count,
-            "following_count": snapshot.following_count
+            "following_count": snapshot.following_count,
+            "username": snapshot.username
         }
         return json.dumps(data, indent=2)
     
@@ -83,7 +86,8 @@ class SnapshotManager:
             followers=data["followers"],
             following=data["following"],
             followers_count=data["followers_count"],
-            following_count=data["following_count"]
+            following_count=data["following_count"],
+            username=data.get("username")  # Optional for backward compatibility
         )
 
     def save(self, snapshot: Snapshot) -> str:
@@ -110,22 +114,44 @@ class SnapshotManager:
         filepath.write_text(json_content, encoding="utf-8")
         
         # Update latest pointer
-        self._update_latest_pointer(str(filename))
+        self._update_latest_pointer(str(filename), snapshot.username)
         
         return str(filepath)
     
-    def _update_latest_pointer(self, filename: str) -> None:
+    def _update_latest_pointer(self, filename: str, username: Optional[str] = None) -> None:
         """Update the latest pointer file to reference the given snapshot.
         
         Args:
             filename: Filename of the latest snapshot
+            username: Username this snapshot belongs to (for multi-account support)
         """
         pointer_path = self.data_dir / self.LATEST_POINTER_FILE
-        pointer_data = {"latest": filename}
+        
+        # Load existing pointers
+        if pointer_path.exists():
+            try:
+                pointer_data = json.loads(pointer_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, FileNotFoundError):
+                pointer_data = {}
+        else:
+            pointer_data = {}
+        
+        # Update global latest
+        pointer_data["latest"] = filename
+        
+        # Update per-user latest if username provided
+        if username:
+            if "by_user" not in pointer_data:
+                pointer_data["by_user"] = {}
+            pointer_data["by_user"][username.lower()] = filename
+        
         pointer_path.write_text(json.dumps(pointer_data, indent=2), encoding="utf-8")
     
-    def load_latest(self) -> Optional[Snapshot]:
+    def load_latest(self, username: Optional[str] = None) -> Optional[Snapshot]:
         """Load most recent snapshot from latest pointer.
+        
+        Args:
+            username: If provided, load latest snapshot for this specific user
         
         Returns:
             Most recent Snapshot object, or None if no snapshots exist
@@ -137,6 +163,15 @@ class SnapshotManager:
         
         try:
             pointer_data = json.loads(pointer_path.read_text(encoding="utf-8"))
+            
+            # If username specified, try to get user-specific latest
+            if username:
+                by_user = pointer_data.get("by_user", {})
+                latest_filename = by_user.get(username.lower())
+                if latest_filename:
+                    return self.load(str(self.data_dir / latest_filename))
+            
+            # Fall back to global latest
             latest_filename = pointer_data.get("latest")
             
             if not latest_filename:

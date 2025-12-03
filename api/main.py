@@ -193,79 +193,162 @@ async def login(request: LoginRequest):
 
 @app.post("/api/auth/verify", response_model=LoginResponse)
 async def verify_login():
-    """Verify that user is logged in after manual login and auto-detect username."""
+    """Verify login and auto-detect username using multiple strategies."""
     if state.browser is None or state.browser.driver is None:
         raise HTTPException(status_code=400, detail="Browser not started")
     
     try:
-        logged_in = state.browser.is_logged_in()
-        state.logged_in = logged_in
+        driver = state.browser.driver
         
-        # Auto-detect username from the Profile link in the sidebar
-        # This is 100% reliable because the Profile link ALWAYS contains YOUR username
-        if logged_in:
-            try:
-                driver = state.browser.driver
-                
-                # The Profile link in Instagram's sidebar has:
-                # 1. An SVG with aria-label="Profile" inside it
-                # 2. An href like "/username/" pointing to YOUR profile
-                # We find the SVG, get its parent <a> tag, and extract the username from href
-                
-                detected_username = driver.execute_script("""
-                    // Find the Profile icon SVG
-                    const profileSvg = document.querySelector('svg[aria-label="Profile"]');
-                    if (!profileSvg) {
-                        console.log('No Profile SVG found');
-                        return null;
-                    }
-                    
-                    // Find the parent <a> tag
+        # Multi-strategy username detection
+        result = driver.execute_script("""
+            let detectedUsername = null;
+            let detectionMethod = null;
+            
+            // Strategy 1: Sidebar Profile SVG (most reliable)
+            try {
+                const profileSvg = document.querySelector('svg[aria-label="Profile"]');
+                if (profileSvg) {
                     let parent = profileSvg.parentElement;
                     while (parent && parent.tagName !== 'A') {
                         parent = parent.parentElement;
                     }
-                    
-                    if (!parent || parent.tagName !== 'A') {
-                        console.log('No parent anchor found');
-                        return null;
+                    if (parent && parent.tagName === 'A') {
+                        const href = parent.getAttribute('href') || '';
+                        const match = href.match(/^\\/([a-zA-Z0-9._]+)\\/?$/);
+                        if (match) {
+                            detectedUsername = match[1];
+                            detectionMethod = 'sidebar_profile';
+                        }
                     }
-                    
-                    // Extract username from href (e.g., "/bryce.o.b/" -> "bryce.o.b")
-                    const href = parent.getAttribute('href') || '';
-                    const match = href.match(/^\\/([a-zA-Z0-9._]+)\\/?$/);
-                    if (match && match[1]) {
-                        return match[1];
+                }
+            } catch (e) {}
+            
+            // Strategy 2: Profile image alt text in navigation
+            if (!detectedUsername) {
+                try {
+                    const navImages = document.querySelectorAll('nav img[alt*="profile picture"], header img[alt*="profile picture"]');
+                    for (const img of navImages) {
+                        const alt = img.getAttribute('alt') || '';
+                        const match = alt.match(/^([a-zA-Z0-9._]+)'s profile picture$/i);
+                        if (match) {
+                            detectedUsername = match[1];
+                            detectionMethod = 'nav_profile_image';
+                            break;
+                        }
                     }
-                    
-                    console.log('Could not extract username from href:', href);
-                    return null;
-                """)
-                
-                if detected_username:
-                    logger.info(f"Auto-detected username: {detected_username}")
-                    # Update config.json
-                    try:
-                        with open("config.json", "r") as f:
-                            config_data = json.load(f)
-                        if config_data.get("username") != detected_username:
-                            config_data["username"] = detected_username
-                            with open("config.json", "w") as f:
-                                json.dump(config_data, f, indent=2)
-                            logger.info(f"Saved username to config: {detected_username}")
-                    except Exception as e:
-                        logger.warning(f"Could not save username: {e}")
-                else:
-                    logger.warning("Could not auto-detect username from Profile link")
-                    
-            except Exception as e:
-                logger.warning(f"Username detection error: {e}")
+                } catch (e) {}
+            }
+            
+            // Strategy 3: More menu profile picture
+            if (!detectedUsername) {
+                try {
+                    const moreImages = document.querySelectorAll('div[role="button"] img');
+                    for (const img of moreImages) {
+                        const alt = img.getAttribute('alt') || '';
+                        if (alt.includes('profile picture')) {
+                            const match = alt.match(/^([a-zA-Z0-9._]+)'s profile picture$/i);
+                            if (match) {
+                                detectedUsername = match[1];
+                                detectionMethod = 'more_menu';
+                                break;
+                            }
+                        }
+                    }
+                } catch (e) {}
+            }
+            
+            // Strategy 4: Profile links with profile picture
+            if (!detectedUsername) {
+                try {
+                    const currentPath = window.location.pathname;
+                    const allLinks = document.querySelectorAll('a[href^="/"]');
+                    for (const link of allLinks) {
+                        const href = link.getAttribute('href') || '';
+                        if (href === currentPath) continue;
+                        if (href.match(/^\\/(explore|direct|reels|stories|p|accounts|reel)\\//)) continue;
+                        if (href.match(/^\\/([a-zA-Z0-9._]+)\\/(followers|following)\\/?$/)) continue;
+                        
+                        const match = href.match(/^\\/([a-zA-Z0-9._]+)\\/?$/);
+                        if (match && match[1].length >= 1 && match[1].length <= 30) {
+                            const hasProfileImg = link.querySelector('img[alt*="profile picture"]') !== null;
+                            const isInNav = link.closest('nav') !== null || 
+                                           link.closest('[role="navigation"]') !== null;
+                            
+                            if (hasProfileImg || isInNav) {
+                                detectedUsername = match[1];
+                                detectionMethod = 'profile_link';
+                                break;
+                            }
+                        }
+                    }
+                } catch (e) {}
+            }
+            
+            // Check login status
+            const isLoggedIn = (
+                document.querySelector('svg[aria-label="Home"]') !== null ||
+                document.querySelector('a[href*="/direct/inbox/"]') !== null
+            ) && !window.location.href.includes('/accounts/login');
+            
+            return {
+                isLoggedIn: isLoggedIn,
+                username: detectedUsername,
+                method: detectionMethod
+            };
+        """)
         
-        await broadcast({"type": "status_change", "browser": True, "logged_in": logged_in})
-        return LoginResponse(
-            success=logged_in,
-            message="Logged in" if logged_in else "Not logged in",
-        )
+        is_logged_in = result.get('isLoggedIn', False)
+        detected_username = result.get('username')
+        method = result.get('method')
+        
+        state.logged_in = is_logged_in
+        
+        if is_logged_in and detected_username:
+            logger.info(f"Username detected: {detected_username} via {method}")
+            
+            # Save to config
+            try:
+                try:
+                    with open("config.json", "r") as f:
+                        config_data = json.load(f)
+                except FileNotFoundError:
+                    config_data = {}
+                
+                if config_data.get("username") != detected_username:
+                    config_data["username"] = detected_username
+                    with open("config.json", "w") as f:
+                        json.dump(config_data, f, indent=2)
+                        
+            except Exception as e:
+                logger.warning(f"Could not save username: {e}")
+            
+            await broadcast({
+                "type": "status_change",
+                "browser": True,
+                "logged_in": True,
+                "username": detected_username
+            })
+            
+            return LoginResponse(
+                success=True,
+                message=f"Logged in as {detected_username}",
+            )
+        
+        elif is_logged_in:
+            await broadcast({"type": "status_change", "browser": True, "logged_in": True})
+            return LoginResponse(
+                success=True,
+                message="Logged in but could not detect username. Please set manually.",
+            )
+        
+        else:
+            await broadcast({"type": "status_change", "browser": True, "logged_in": False})
+            return LoginResponse(
+                success=False,
+                message="Not logged in",
+            )
+            
     except Exception as e:
         logger.error(f"Verify error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -275,7 +358,7 @@ async def verify_login():
 async def logout():
     """Close browser and logout."""
     if state.browser:
-        state.browser.quit()
+        state.browser.close()
         state.browser = None
     state.browser_connected = False
     state.logged_in = False
@@ -359,6 +442,7 @@ async def run_compare_operation(operation_id: str):
             timestamp=timestamp,
             followers=followers,
             following=following,
+            username=username,
         )
         state.snapshot_manager.save(snapshot)
         
@@ -370,13 +454,23 @@ async def run_compare_operation(operation_id: str):
         skip_list = state.skip_list_manager.load()
         comparator = SnapshotComparator(skip_list)
         
-        # Get previous snapshot
-        previous = state.snapshot_manager.load_latest()
+        # Get previous snapshot for THIS USER
+        previous = state.snapshot_manager.load_latest(username=username)
         if previous and previous.timestamp != timestamp:
             result = comparator.compare(previous, snapshot)
-            # Save comparison result
-            comparison_path = Path("snapshots") / "latest_comparison.json"
+            # Save comparison result (account-specific)
+            comparison_filename = f"latest_comparison_{username.lower()}.json"
+            comparison_path = Path("snapshots") / comparison_filename
             comparison_path.write_text(json.dumps({
+                "unfollowers": result.unfollowers,
+                "not_following_back": result.not_following_back,
+                "new_followers": result.new_followers,
+                "timestamp": result.timestamp,
+            }, indent=2))
+            
+            # Also update the generic latest_comparison.json for backward compatibility
+            generic_path = Path("snapshots") / "latest_comparison.json"
+            generic_path.write_text(json.dumps({
                 "unfollowers": result.unfollowers,
                 "not_following_back": result.not_following_back,
                 "new_followers": result.new_followers,
@@ -479,20 +573,51 @@ async def run_unfollow_operation(
         
         # Remove successfully unfollowed users from the comparison data
         if result.successful and not dry_run:
+            # Get current username
+            username = None
+            try:
+                with open("config.json", "r") as f:
+                    data = json.load(f)
+                    username = data.get("username", "").strip()
+            except Exception:
+                pass
+            
+            unfollowed_set = {u.lower() for u in result.successful}
+            
+            # Update account-specific comparison if username is known
+            if username:
+                comparison_filename = f"latest_comparison_{username.lower()}.json"
+                comparison_path = Path("snapshots") / comparison_filename
+                if comparison_path.exists():
+                    try:
+                        comparison_data = json.loads(comparison_path.read_text())
+                        comparison_data["not_following_back"] = [
+                            u for u in comparison_data.get("not_following_back", [])
+                            if u.lower() not in unfollowed_set
+                        ]
+                        comparison_path.write_text(json.dumps(comparison_data, indent=2))
+                        logger.info(f"Removed {len(result.successful)} users from {username}'s not_following_back list")
+                    except Exception as e:
+                        logger.warning(f"Could not update account-specific comparison: {e}")
+            
+            # Also update generic comparison for backward compatibility
             comparison_path = Path("snapshots") / "latest_comparison.json"
             if comparison_path.exists():
                 try:
                     comparison_data = json.loads(comparison_path.read_text())
-                    # Remove unfollowed users from not_following_back list
-                    unfollowed_set = {u.lower() for u in result.successful}
                     comparison_data["not_following_back"] = [
                         u for u in comparison_data.get("not_following_back", [])
                         if u.lower() not in unfollowed_set
                     ]
                     comparison_path.write_text(json.dumps(comparison_data, indent=2))
-                    logger.info(f"Removed {len(result.successful)} users from not_following_back list")
                 except Exception as e:
-                    logger.warning(f"Could not update comparison file: {e}")
+                    logger.warning(f"Could not update generic comparison file: {e}")
+            
+            # Broadcast update to frontend
+            await broadcast({
+                "type": "comparison_updated",
+                "removed_count": len(result.successful)
+            })
         
         state.last_operation = {
             "type": "unfollow",
@@ -544,7 +669,33 @@ async def get_latest_snapshot():
 
 @app.get("/api/comparison/latest", response_model=Optional[ComparisonResponse])
 async def get_latest_comparison():
-    """Get the latest comparison results."""
+    """Get the latest comparison results for the current user."""
+    # Try to get username from config
+    username = None
+    try:
+        with open("config.json", "r") as f:
+            data = json.load(f)
+            username = data.get("username", "").strip()
+    except Exception:
+        pass
+    
+    # Try account-specific comparison first
+    if username:
+        comparison_filename = f"latest_comparison_{username.lower()}.json"
+        comparison_path = Path("snapshots") / comparison_filename
+        if comparison_path.exists():
+            try:
+                data = json.loads(comparison_path.read_text())
+                return ComparisonResponse(
+                    unfollowers=data.get("unfollowers", []),
+                    not_following_back=data.get("not_following_back", []),
+                    new_followers=data.get("new_followers", []),
+                    timestamp=data.get("timestamp", ""),
+                )
+            except Exception:
+                pass
+    
+    # Fall back to generic comparison
     comparison_path = Path("snapshots") / "latest_comparison.json"
     if not comparison_path.exists():
         return None
@@ -601,6 +752,17 @@ async def get_config():
     except Exception:
         pass
     
+    # Get list of accounts that have been scraped
+    available_accounts = []
+    try:
+        pointer_path = Path("snapshots") / "latest.json"
+        if pointer_path.exists():
+            pointer_data = json.loads(pointer_path.read_text())
+            by_user = pointer_data.get("by_user", {})
+            available_accounts = sorted(list(by_user.keys()))
+    except Exception:
+        pass
+    
     return {
         "username": username,
         "action_delay_min": state.config.action_delay_min,
@@ -608,6 +770,7 @@ async def get_config():
         "scroll_delay": getattr(state.config, "scroll_delay", 0.5),
         "element_timeout": state.config.element_timeout,
         "max_retries": state.config.max_retries,
+        "available_accounts": available_accounts,
     }
 
 

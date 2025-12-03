@@ -1,4 +1,5 @@
 import { MetricCard } from './MetricCard';
+import { useAppStore } from '../stores/appStore';
 import type { Snapshot, Comparison } from '../types';
 
 interface MetricsRowProps {
@@ -7,6 +8,11 @@ interface MetricsRowProps {
 }
 
 export function MetricsRow({ snapshot, comparison }: MetricsRowProps) {
+  const { unfollowedCount } = useAppStore();
+  
+  // Adjust following count by subtracting unfollowed accounts
+  const adjustedFollowingCount = (snapshot?.following_count ?? 0) - unfollowedCount;
+  
   return (
     <div className="grid grid-cols-5 gap-4">
       <MetricCard
@@ -16,7 +22,8 @@ export function MetricsRow({ snapshot, comparison }: MetricsRowProps) {
       />
       <MetricCard
         label="Following"
-        value={snapshot?.following_count ?? 0}
+        value={adjustedFollowingCount}
+        delta={unfollowedCount > 0 ? -unfollowedCount : undefined}
         accent="default"
       />
       <MetricCard
